@@ -6458,9 +6458,14 @@ async def quota_guard(update: Update, action: str = "general") -> bool:
 # ============================= Coding command catalogue =============================
 # এই তালিকাটাই /start, /menu এবং /codehelp—তিন জায়গায় ব্যবহার হয়। ফলে নতুন coding
 # command যোগ হলে এক জায়গায় আপডেট করলেই সব help surface একই থাকে।
-CODING_COMMAND_GROUPS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+# প্রতিটা গ্রুপের দ্বিতীয় উপাদানটা হলো admin_only ফ্ল্যাগ — /start, /help, /menu ও
+# /codehelp-এর মতো user-facing help surface-এ শুধু ফ্ল্যাগ False অর্থাৎ public গ্রুপই
+# দেখানো হয়; admin-only command-এর নিজেদের handler অপরিবর্তিত থাকে।
+# টাইপ: (group_title, admin_only, commands)
+CODING_COMMAND_GROUPS: Tuple[Tuple[str, bool, Tuple[Tuple[str, str], ...]], ...] = (
     (
         "👤 সবার জন্য",
+        False,
         (
             ("/codehelp", "এই সম্পূর্ণ coding command তালিকা"),
             ("/codingengine", "coding engine ও module status"),
@@ -6480,6 +6485,7 @@ CODING_COMMAND_GROUPS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
     ),
     (
         "🔐 শুধু অ্যাডমিন",
+        True,
         (
             ("/codebasescan [path]", "codebase scan ও re-index"),
             ("/codebasestatus [path]", "codebase index status"),
@@ -6500,9 +6506,13 @@ CODING_COMMAND_GROUPS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
 
 
 def build_coding_commands_text(include_title: bool = True) -> str:
-    """সব registered coding command-এর user-facing তালিকা তৈরি করে।"""
+    """user-facing তালিকা তৈরি করে — শুধু public (সবার) coding command।
+    admin-only গ্রুপগুলো (/start, /help, /menu ও /codehelp-এর কোনোটাতেই দেখানো হয় না)
+    এখানে ইচ্ছে করেই বাদ দেওয়া।"""
     lines = ["💻 Coding Commands", "━━━━━━━━━━━━━━━"] if include_title else []
-    for group_title, commands in CODING_COMMAND_GROUPS:
+    for group_title, admin_only, commands in CODING_COMMAND_GROUPS:
+        if admin_only:
+            continue
         if lines:
             lines.append("")
         lines.append(group_title)
@@ -6567,8 +6577,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/askpdf প্রশ্ন — PDF-এ রিপ্লাই দিয়ে (অথবা আগে একবার পড়ানো থাকলে সরাসরি) নির্দিষ্ট প্রশ্নের উত্তর\n"
         "/clearpdf — সংরক্ষিত PDF সেশন মুছে ফেলা\n\n"
         "💻 কোডিং\n"
-        "Project plan, code generation, test, review, security ও rollback-এর সব command "
-        "পরের বার্তায় দেখুন; যেকোনো সময় /codehelp লিখতে পারেন।\n\n"
+        f"{CODING_COMMANDS_BODY}\n\n"
         "👤 অন্যান্য\n"
         "/profile — আপনার ব্যবহারের হিসাব\n"
         "/mylimit — আজকের বাকি সীমা\n"
@@ -6596,11 +6605,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━\n"
         f"✨ Developed by {CREATOR_COMPANY}"
     )
+    # Phase 45: /start-এর সব তথ্য (public coding command সহ) এখন একটাই বার্তায় —
+    # আলাদা দ্বিতীয় বার্তা নেই। তালিকাটা /menu ও /codehelp-এর সঙ্গে একই shared source
+    # (CODING_COMMAND_GROUPS) থেকে তৈরি, তাই সব help surface একই থাকে।
     await update.message.reply_text(await localize(user_id, text))
-    # আলাদা বার্তায় রাখায় Telegram-এর ৪০৯৬ অক্ষরের সীমা পেরোবে না এবং তালিকাটা
-    # /menu ও /codehelp-এর সঙ্গে একই shared source থেকে তৈরি হবে।
-    coding_text = await localize(user_id, build_coding_commands_text())
-    await send_long_text(update, coding_text)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13550,7 +13558,7 @@ async def deleteproject_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def codehelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/codehelp — public ও admin coding command-এর সম্পূর্ণ তালিকা।"""
+    """/codehelp — public coding command-গুলোর সম্পূর্ণ তালিকা (admin-only command বাদে)।"""
     user_id = update.effective_user.id
     text = await localize(user_id, build_coding_commands_text())
     await send_long_text(update, text)
