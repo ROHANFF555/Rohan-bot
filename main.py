@@ -92,6 +92,9 @@ Phase 5 আপডেটে যা যা নতুন যোগ হয়েছ�
   Admin Control Panel — /adminpanel লিখলে বাটন-ভিত্তিক ইনলাইন কীবোর্ড প্যানেল খুলবে:
   ইউজার আইডি সার্চ করে এক জায়গা থেকেই ব্যান/আনব্যান, প্রিমিয়াম দেওয়া/বাতিল করা যাবে,
   সাথে প্রিমিয়াম তালিকা, পরিসংখ্যান ও অ্যাডমিন তালিকা দেখা যাবে — কোনো কমান্ড টাইপ না করেই।
+  Admin-only coding command-গুলো (/codebasescan, /codeauto, /codeexec ইত্যাদি) সাধারণ
+  ইউজারদের /start, /help, /menu বা /codehelp-এ দেখানো হয় না — ওগুলোর তালিকা শুধু এই
+  প্যানেলের "💻 Admin Coding কমান্ড" বাটনে থাকে, আর প্রতিটা কমান্ডের ভিতরে is_admin() চেক আছে।
 
 Phase 6 আপডেটে যা যা নতুন যোগ হয়েছে:
   আরও গভীর Analytics (/analytics [দিন]) — সর্বকালের সেরা ১০ কমান্ড/ফিচার, দিনের কোন
@@ -6523,6 +6526,29 @@ def build_coding_commands_text(include_title: bool = True) -> str:
 CODING_COMMANDS_BODY = build_coding_commands_text(include_title=False)
 
 
+def build_admin_coding_commands_text() -> str:
+    """🔐 admin-only coding command-গুলোর তালিকা — শুধু /adminpanel-এর ভিতরে দেখানো হয়।
+
+    সাধারণ ইউজারের কোনো help surface-এ (/start, /help, /menu, /codehelp) এই লেখা
+    কখনো পাঠানো হয় না; তালিকাটা একমাত্র Admin Control Panel-এর ভেতরেই যায়। প্রতিটা
+    কমান্ডের নিজস্ব handler-এর শুরুতে is_admin() চেক আগে থেকেই আছে, তাই কেউ কমান্ডটা
+    নিজে থেকে টাইপ করলেও "⛔ এই কমান্ডটি শুধু অ্যাডমিনের জন্য।" উত্তর পাবে।
+    """
+    lines = [
+        "🔐 Admin-only Coding Commands",
+        "━━━━━━━━━━━━━━━",
+        "এই কমান্ডগুলো শুধু অ্যাডমিন চালাতে পারেন। সাধারণ ইউজারদের",
+        "/start, /help, /menu বা /codehelp-এ এগুলো দেখানো হয় না।",
+    ]
+    for group_title, admin_only, commands in CODING_COMMAND_GROUPS:
+        if not admin_only:
+            continue
+        lines.append("")
+        lines.append(group_title)
+        lines.extend(f"{usage} — {description}" for usage, description in commands)
+    return "\n".join(lines)
+
+
 # ============================= বেসিক কমান্ড =============================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6608,6 +6634,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Phase 45: /start-এর সব তথ্য (public coding command সহ) এখন একটাই বার্তায় —
     # আলাদা দ্বিতীয় বার্তা নেই। তালিকাটা /menu ও /codehelp-এর সঙ্গে একই shared source
     # (CODING_COMMAND_GROUPS) থেকে তৈরি, তাই সব help surface একই থাকে।
+    # 🔐 admin-only coding command (/codebasescan, /codeauto, /codeexec …) এখানে ইচ্ছে করেই
+    # নেই: CODING_COMMANDS_BODY শুধু public গ্রুপ নেয়। ওগুলোর তালিকা থাকে শুধু /adminpanel-এর
+    # ভিতরে, আর প্রতিটা কমান্ডের handler-এ is_admin() চেক থাকায় সাধারণ ইউজার চালাতেও পারে না।
     await update.message.reply_text(await localize(user_id, text))
 
 
@@ -9191,6 +9220,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message_text(query, "Decision history পড়তে সমস্যা হয়েছে।", reply_markup=build_admin_back_kb())
         elif data == "adm_roles":
             await safe_edit_message_text(query, build_admin_roles_text(), reply_markup=build_admin_back_kb())
+        elif data == "adm_codecommands":
+            # 🔐 admin-only coding command-এর তালিকা — এই branch-এ পৌঁছানোর আগেই
+            # is_admin() চেক হয়ে গেছে (adm_ prefix-এর শুরুতে), তাই সাধারণ ইউজার এটা দেখবে না।
+            report = build_admin_coding_commands_text()
+            if len(report) > TELEGRAM_MAX_MSG_LEN:
+                report = report[:TELEGRAM_MAX_MSG_LEN] + "\n...(তালিকা অনেক বড়, কেটে দেওয়া হয়েছে)"
+            await safe_edit_message_text(query, report, reply_markup=build_admin_back_kb())
         elif data == "adm_broadcast_info":
             await safe_edit_message_text(query, 
                 "📢 ব্রডকাস্ট পাঠাতে লিখুন:\n/broadcast আপনার মেসেজ\n\n"
@@ -9745,7 +9781,10 @@ def build_admin_panel_view(user_id: int):
         f"🛠️ Admin Control Panel\n"
         f"আপনার রোল: {ADMIN_ROLE_LABEL_BN.get(role, role)}\n"
         "━━━━━━━━━━━━━━━\n"
-        "নিচের বাটন থেকে বেছে নিন:"
+        "নিচের বাটন থেকে বেছে নিন:\n\n"
+        "🔐 Admin-only coding command-গুলো (যেমন /codebasescan, /codeauto) সাধারণ\n"
+        "ইউজারদের /start, /help, /menu ও /codehelp-এ দেখানো হয় না — ওগুলোর তালিকা\n"
+        "এই প্যানেলের ভিতরেই আছে (\"💻 Admin Coding কমান্ড\" বাটন)।"
     )
     rows = [[InlineKeyboardButton("🔍 ইউজার সার্চ", callback_data="adm_search")]]
     rows.append([InlineKeyboardButton("👑 প্রিমিয়াম তালিকা", callback_data="adm_premiumlist")])
@@ -9754,6 +9793,7 @@ def build_admin_panel_view(user_id: int):
     rows.append([InlineKeyboardButton("🧠 Brain Status", callback_data="adm_brainstatus")])
     rows.append([InlineKeyboardButton("🕘 Decision History", callback_data="adm_decisionhistory")])
     rows.append([InlineKeyboardButton("👥 অ্যাডমিন তালিকা", callback_data="adm_roles")])
+    rows.append([InlineKeyboardButton("💻 Admin Coding কমান্ড", callback_data="adm_codecommands")])
     if has_role(user_id, "admin"):
         rows.append([InlineKeyboardButton("📢 ব্রডকাস্ট (নির্দেশনা)", callback_data="adm_broadcast_info")])
     return text, InlineKeyboardMarkup(rows)

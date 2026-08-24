@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# বট রানটাইম ফাইল (লোকাল ডেটা, রিপোতে ঢোকানো যাবে না)
+bot_data.db
+bot_data.db-journal
+bot_data.db.before_restore.bak
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
