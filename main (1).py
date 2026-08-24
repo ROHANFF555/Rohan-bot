@@ -6455,6 +6455,64 @@ async def quota_guard(update: Update, action: str = "general") -> bool:
     return True
 
 
+# ============================= Coding command catalogue =============================
+# এই তালিকাটাই /start, /menu এবং /codehelp—তিন জায়গায় ব্যবহার হয়। ফলে নতুন coding
+# command যোগ হলে এক জায়গায় আপডেট করলেই সব help surface একই থাকে।
+CODING_COMMAND_GROUPS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+    (
+        "👤 সবার জন্য",
+        (
+            ("/codehelp", "এই সম্পূর্ণ coding command তালিকা"),
+            ("/codingengine", "coding engine ও module status"),
+            ("/codeproject <বিবরণ>", "নতুন coding project ও ধাপভিত্তিক plan"),
+            ("/codeplan <বিবরণ>", "autonomous multi-step plan তৈরি"),
+            ("/codenext", "পরের task implement, test ও review"),
+            ("/codestatus", "active project-এর অগ্রগতি"),
+            ("/codetask <নাম্বার>", "নির্দিষ্ট সম্পন্ন task-এর code"),
+            ("/codeprojects", "আপনার সব coding project"),
+            ("/useproject <আইডি>", "একটি project active করা"),
+            ("/exportcode", "সম্পন্ন code ফাইল হিসেবে নেওয়া"),
+            ("/deleteproject <আইডি>", "নিজের project মুছে ফেলা"),
+            ("/codehistory", "project snapshot history"),
+            ("/codediff <seq1> <seq2>", "দুই snapshot-এর diff"),
+            ("/coderollback [seq]", "known-good snapshot-এ ফেরা"),
+        ),
+    ),
+    (
+        "🔐 শুধু অ্যাডমিন",
+        (
+            ("/codebasescan [path]", "codebase scan ও re-index"),
+            ("/codebasestatus [path]", "codebase index status"),
+            ("/contextpreview <request>", "Smart Context preview"),
+            ("/testreport <task_id>", "autonomous test report"),
+            ("/errorfixlog <task_id>", "auto-fix attempt log"),
+            ("/reviewreport <task_id>", "code review report"),
+            ("/securityscan [mode]", "security scan চালানো"),
+            ("/projectmemory [query]", "Project Memory দেখা/খোঁজা"),
+            ("/codingknowledge [query]", "coding knowledge দেখা/খোঁজা"),
+            ("/impactanalysis <file/request>", "change impact analysis"),
+            ("/codeauto [project_id] [max_tasks]", "continuous autonomous run"),
+            ("/codeautostatus", "সর্বশেষ autonomous run status"),
+            ("/codeexec <command>", "allow-listed workspace command চালানো"),
+        ),
+    ),
+)
+
+
+def build_coding_commands_text(include_title: bool = True) -> str:
+    """সব registered coding command-এর user-facing তালিকা তৈরি করে।"""
+    lines = ["💻 Coding Commands", "━━━━━━━━━━━━━━━"] if include_title else []
+    for group_title, commands in CODING_COMMAND_GROUPS:
+        if lines:
+            lines.append("")
+        lines.append(group_title)
+        lines.extend(f"{usage} — {description}" for usage, description in commands)
+    return "\n".join(lines)
+
+
+CODING_COMMANDS_BODY = build_coding_commands_text(include_title=False)
+
+
 # ============================= বেসিক কমান্ড =============================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6508,6 +6566,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ocr — কোনো ছবিতে রিপ্লাই দিয়ে লিখুন, ছবির লেখা বের করে দেবে\n"
         "/askpdf প্রশ্ন — PDF-এ রিপ্লাই দিয়ে (অথবা আগে একবার পড়ানো থাকলে সরাসরি) নির্দিষ্ট প্রশ্নের উত্তর\n"
         "/clearpdf — সংরক্ষিত PDF সেশন মুছে ফেলা\n\n"
+        "💻 কোডিং\n"
+        "Project plan, code generation, test, review, security ও rollback-এর সব command "
+        "পরের বার্তায় দেখুন; যেকোনো সময় /codehelp লিখতে পারেন।\n\n"
         "👤 অন্যান্য\n"
         "/profile — আপনার ব্যবহারের হিসাব\n"
         "/mylimit — আজকের বাকি সীমা\n"
@@ -6536,6 +6597,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✨ Developed by {CREATOR_COMPANY}"
     )
     await update.message.reply_text(await localize(user_id, text))
+    # আলাদা বার্তায় রাখায় Telegram-এর ৪০৯৬ অক্ষরের সীমা পেরোবে না এবং তালিকাটা
+    # /menu ও /codehelp-এর সঙ্গে একই shared source থেকে তৈরি হবে।
+    coding_text = await localize(user_id, build_coding_commands_text())
+    await send_long_text(update, coding_text)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8862,6 +8927,10 @@ MENU_SECTIONS = {
         "/ocr — কোনো ছবিতে রিপ্লাই দিয়ে লিখুন, ছবির লেখা বের করে দেবে\n"
         "/detectlang লেখা — ভাষা শনাক্ত করা",
     ),
+    "coding": (
+        "💻 কোডিং কমান্ড",
+        CODING_COMMANDS_BODY,
+    ),
     "media": (
         "🎬 ভিডিও ও কণ্ঠ",
         "/dub — ভিডিওতে রিপ্লাই দিয়ে লিখুন, বাংলা কণ্ঠে ডাবিং করে দেবে (২০ MB এর নিচে)\n"
@@ -8903,6 +8972,7 @@ async def build_menu_root(user_id: int):
     text = await localize(user_id, "📋 মেনু থেকে একটা বিভাগ বেছে নিন:")
     keyboard = [
         [InlineKeyboardButton(MENU_SECTIONS["text"][0], callback_data="menu_text")],
+        [InlineKeyboardButton(MENU_SECTIONS["coding"][0], callback_data="menu_coding")],
         [InlineKeyboardButton(MENU_SECTIONS["media"][0], callback_data="menu_media")],
         [InlineKeyboardButton(MENU_SECTIONS["profile"][0], callback_data="menu_profile")],
         [InlineKeyboardButton(MENU_SECTIONS["fun"][0], callback_data="menu_fun")],
@@ -13480,22 +13550,10 @@ async def deleteproject_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def codehelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/codehelp — Coding Orchestrator ফিচারের কমান্ড তালিকা।"""
-    await update.message.reply_text(
-        "🛠️ Coding Orchestrator — বড় কোডিং কাজ ছোট ছোট ধাপে ভাগ করে সামলানোর ফিচার:\n\n"
-        "/codeproject <বিবরণ> — নতুন প্রজেক্ট শুরু (বিশ্লেষণ + প্ল্যান তৈরি)\n"
-        "/codenext — পরের ধাপ প্রসেস করা\n"
-        "/codestatus — সক্রিয় প্রজেক্টের অগ্রগতি দেখা\n"
-        "/codetask <নাম্বার> — নির্দিষ্ট ধাপের কোড দেখা\n"
-        "/codeprojects — সব প্রজেক্টের তালিকা\n"
-        "/useproject <আইডি> — একটা প্রজেক্ট সক্রিয় করা\n"
-        "/exportcode — এখন পর্যন্ত সম্পন্ন সব কোড ফাইল আকারে পাওয়া\n"
-        "/deleteproject <আইডি> — একটা প্রজেক্ট মুছে ফেলা\n\n"
-        "🗂️ Git/Rollback Intelligence:\n"
-        "/codehistory — সব স্ন্যাপশটের তালিকা\n"
-        "/codediff <seq1> <seq2> — দুইটা ধাপের কোডের পার্থক্য দেখা\n"
-        "/coderollback [seq] — সর্বশেষ (বা নির্দিষ্ট) known-good অবস্থায় ফেরা"
-    )
+    """/codehelp — public ও admin coding command-এর সম্পূর্ণ তালিকা।"""
+    user_id = update.effective_user.id
+    text = await localize(user_id, build_coding_commands_text())
+    await send_long_text(update, text)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
