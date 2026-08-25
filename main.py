@@ -358,7 +358,7 @@ WHISPER_SUPPORT = bool(GROQ_API_KEY)
 
 # Provider-ভিত্তিক মডেল — future-তে বদলাতে চাইলে শুধু Secrets/env-এ বসালেই হবে, কোড এডিট লাগবে না
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "llama3.1-8b").strip()
 AI_MODEL = GROQ_MODEL  # ব্যাকওয়ার্ড-কম্প্যাটিবিলিটি: পুরনো কোডের কোথাও AI_MODEL রেফারেন্স থাকলে যেন না ভাঙে
 
@@ -10840,6 +10840,11 @@ def delete_project(project_id: int, user_id: int) -> bool:
 
 AUTONOMOUS_MAX_RETRIES = 3
 AUTONOMOUS_MAX_PLAN_TASKS = CODE_TASK_MAX_TASKS
+NO_API_CODING_BLOCKED_MESSAGE = (
+    "⚠️ No API Mode চালু আছে — Brain OS একা এই কাজ করতে পারছে না। "
+    "`/noapimode off` দিয়ে বন্ধ করুন অথবা Brain OS-এ এই ধরনের প্রজেক্টের knowledge/pattern যোগ করুন।"
+)
+NO_API_PLAN_BLOCKED_MESSAGE = "⚠️ No API Mode চালু আছে — AI প্ল্যান বানাতে পারেনি। /noapimode off দিয়ে বন্ধ করুন।"
 
 
 def _autonomous_request_kind(user_text: str) -> dict:
@@ -10888,6 +10893,17 @@ async def autonomous_generate_plan(user_id: int, user_text: str) -> dict:
         f"Request type: {analysis['classification'].get('task_kind')}\n"
         f"Compact context:\n{_autonomous_context_text(ctx)}"
     )
+    if is_no_api_mode(user_id):
+        stuck_msg = build_no_api_stuck_message({"stage": "coding_plan_ai", "confidence": 0.0})
+        return {
+            "project_name": user_text[:50] or "Autonomous Project",
+            "stack": "unknown",
+            "tasks": [{"title": "No API Mode চালু আছে", "description": stuck_msg, "depends_on_seq": None, "target_files": []}],
+            "analysis": analysis,
+            "fallback": True,
+            "no_api_blocked": True,
+        }
+
     try:
         reply = await ask_ai(system, user_text)
         parsed = _extract_json_object(reply)
@@ -11231,6 +11247,23 @@ def autonomous_retry_allowed(task:dict) -> bool:
 
 async def autonomous_implement_task(project:dict,task:dict) -> dict:
     """IMPLEMENT: generate only this task's artifact using Smart Context; no project-wide prompt."""
+    # /codeplan tasks use this Phase 20 path directly (rather than the legacy
+    # process_next_code_task path), so enforce the same per-user no-API policy here too.
+    if is_no_api_mode(project.get("user_id", 0)):
+        stuck_msg = build_no_api_stuck_message({"stage": "coding_ai_route", "confidence": 0.0})
+        blocked_code = f"[No API Mode]\n{stuck_msg}"
+        save_task_result(task["id"], blocked_code, source="no_api_blocked", status="failed")
+        autonomous_set_task_state(task["id"], "failed", "coding_ai_route", stuck_msg)
+        task.update({
+            "code": blocked_code,
+            "source": "no_api_blocked",
+            "status": "failed",
+            "workflow_stage": "coding_ai_route",
+            "last_error": stuck_msg,
+            "no_api_blocked": True,
+        })
+        return task
+
     autonomous_set_task_state(task["id"],"in_progress","implement","")
     task["status"]="in_progress"; task["workflow_stage"]="implement"
     try:
@@ -11882,7 +11915,10 @@ async def codeplan_command(update:Update,context:ContextTypes.DEFAULT_TYPE):
     thinking=await update.message.reply_text("🤖 Autonomous Agent: ANALYZE → PLAN চলছে…")
     try:
         plan=await autonomous_generate_plan(user_id,text); pid=autonomous_save_plan(user_id,plan); project=get_project(pid,owner_id=user_id)
-        await send_long_text(update,"✅ Autonomous plan saved.\n\n"+build_project_status_text(project)+"\n\n/codenext দিয়ে implementation শুরু করুন।")
+        if plan.get("no_api_blocked"):
+            await update.message.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
+        else:
+            await send_long_text(update,"✅ Autonomous plan saved.\n\n"+build_project_status_text(project)+"\n\n/codenext দিয়ে implementation শুরু করুন।")
     except Exception as e:
         logger.warning("Phase 20 /codeplan failed: %s",e); await update.message.reply_text("Autonomous plan তৈরি করতে সমস্যা হয়েছে।")
     finally:
@@ -11929,6 +11965,13 @@ async def process_next_code_task(project: dict):
             brain_os_metrics["direct_failures"] += 1
     except Exception as e:
         logger.warning("Phase 17 coding Decision Engine fallback: %s", e)
+
+    if is_no_api_mode(project.get("user_id", 0)):
+        stuck_msg = build_no_api_stuck_message({"stage": "coding_ai_route", "confidence": 0.0})
+        save_task_result(task["id"], f"[No API Mode]\n{stuck_msg}", source="no_api_blocked", status="failed")
+        task["code"], task["source"], task["status"] = stuck_msg, "no_api_blocked", "failed"
+        task["no_api_blocked"] = True
+        return task
 
     brain_os_metrics["ai_routes"] += 1
     all_tasks = get_project_tasks(project["id"])
@@ -13465,7 +13508,9 @@ async def codenext_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result=await autonomous_run_next(project)
         else:
             result=await process_next_code_task(project)
-        if result and result.get("status")=="done":
+        if result and result.get("no_api_blocked"):
+            await update.message.reply_text(NO_API_CODING_BLOCKED_MESSAGE)
+        elif result and result.get("status")=="done":
             try:
                 imp=result.get("phase28_impact",{}) or {}
                 phase28_record_outcome(int(project.get("id",0)),imp.get("expected_files",[]),"success",False,imp,int(imp.get("risk_score",0)),str(imp.get("risk_level","LOW")))
