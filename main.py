@@ -15823,6 +15823,26 @@ def _build_mcp_server():
         # কিছু লাইব্রেরি ভার্সনে/প্যাকেজে FastMCP আলাদা স্ট্যান্ডঅ্যালোন 'fastmcp' প্যাকেজে থাকে
         from fastmcp import FastMCP
 
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        TransportSecuritySettings = None
+
+    from urllib.parse import urlparse
+    # PUBLIC_URL মডিউল-লেভেলে নেই — run_bot_async()-এ লোকাল; এখানে env থেকেই পড়া
+    PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    _public_host = urlparse(PUBLIC_URL).netloc if PUBLIC_URL else ""
+
+    _transport_security = None
+    if TransportSecuritySettings is not None and _public_host:
+        # mcp লাইব্রেরির DNS-rebinding protection ডিফল্টে allowed_hosts খালি রাখে,
+        # ফলে Render-এর আসল Host (যেমন rohan-bot-eod2.onrender.com) match না করে
+        # OAuth পাশ করার পরও /mcp রিকোয়েস্ট 421 দিয়ে বাতিল হয়।
+        _transport_security = TransportSecuritySettings(
+            allowed_hosts=[_public_host],
+            allowed_origins=["https://claude.ai", PUBLIC_URL],
+        )
+
     # stateless_http + json_response: SSE/streaming বাদ দিয়ে সাধারণ request/response ব্যবহার
     # করে — কিছু হোস্টিং প্ল্যাটফর্মের প্রক্সি স্ট্রিমিং/SSE ঠিকভাবে সাপোর্ট করে না, তাই এই
     # মোডে চালানো অনেক বেশি নির্ভরযোগ্য (Claude-এর সাথে কানেকশন silently ভেঙে যাওয়া ঠেকায়)।
@@ -15835,6 +15855,7 @@ def _build_mcp_server():
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
+        transport_security=_transport_security,
     )
 
     @mcp_app.tool()
