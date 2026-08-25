@@ -5404,11 +5404,11 @@ class BaseAIProvider:
     def is_configured(self) -> bool:
         return self.key_pool.has_keys()
 
-    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float) -> str:
+    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float, max_tokens: int = 1024) -> str:
         """সাব-ক্লাস এটা ওভাররাইড করে — একটা নির্দিষ্ট Key দিয়ে আসল API কল করে।"""
         raise NotImplementedError
 
-    async def chat(self, system_prompt: str, messages: list, timeout: float) -> str:
+    async def chat(self, system_prompt: str, messages: list, timeout: float, max_tokens: int = 1024) -> str:
         """
         Key Rotation + Load Balancer: pool-এর স্বাস্থ্যবান Key-গুলোর মধ্যে সবচেয়ে কম ব্যস্ত/
         দ্রুতটা বেছে চেষ্টা করে। Phase 9: একটা Key সাথে সাথে বাদ না দিয়ে, প্রথমে সেই একই
@@ -5417,6 +5417,9 @@ class BaseAIProvider:
         অযথা Key/Provider বদলানো কমে। শুধু বারবার ব্যর্থ হলে বা Key সাময়িক Inactive (Health
         Checker) হয়ে গেলে তবেই একই Provider-এর পরের সেরা Key-তে যাওয়া হয় — পুরো pool শেষ
         না হওয়া পর্যন্ত (তখনই AIRouter পরের Provider-এ যাবে)।
+
+        Phase 20-fix: max_tokens pass-through — /codeplan-এর মতো বড় JSON আউটপুটের জন্য
+        কলার চাওয়া মান (default 1024) প্রতিটা _call_with_key-তে পৌঁছে দেওয়া হয়।
         """
         if not self.key_pool.has_keys():
             raise AIProviderError(f"{self.name}: কোনো API Key কনফিগার করা নেই")
@@ -5435,7 +5438,7 @@ class BaseAIProvider:
                 attempt += 1
                 call_start = time.time()
                 try:
-                    result = await self._call_with_key(managed_key, system_prompt, messages, timeout)
+                    result = await self._call_with_key(managed_key, system_prompt, messages, timeout, max_tokens)
                     elapsed = time.time() - call_start
                     # Phase 10: বিস্তারিত Logging — কোন Provider/Key (শুধু নম্বর/label, আসল Key নয়),
                     # Response Time, Retry Count প্রতিটা সফল রিকোয়েস্টেই লগ হয়।
@@ -5482,7 +5485,7 @@ class OpenRouterProvider(BaseAIProvider):
     name = "OpenRouter"
     BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float) -> str:
+    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float, max_tokens: int = 1024) -> str:
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         start = time.time()
         managed_key.in_flight += 1
@@ -5498,7 +5501,7 @@ class OpenRouterProvider(BaseAIProvider):
                         "Content-Type": "application/json",
                         "X-Title": BOT_NAME,
                     },
-                    json={"model": self.model, "messages": full_messages, "max_tokens": 1024},
+                    json={"model": self.model, "messages": full_messages, "max_tokens": max_tokens},
                     timeout=timeout,
                 )
             except httpx.TimeoutException:
@@ -5538,11 +5541,11 @@ class GroqProvider(BaseAIProvider):
             self._clients[managed_key.label] = client
         return client
 
-    def _sync_call(self, client, full_messages: list) -> str:
-        response = client.chat.completions.create(model=self.model, messages=full_messages, max_tokens=1024)
+    def _sync_call(self, client, full_messages: list, max_tokens: int = 1024) -> str:
+        response = client.chat.completions.create(model=self.model, messages=full_messages, max_tokens=max_tokens)
         return response.choices[0].message.content
 
-    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float) -> str:
+    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float, max_tokens: int = 1024) -> str:
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         client = self._get_client(managed_key)
         start = time.time()
@@ -5550,7 +5553,7 @@ class GroqProvider(BaseAIProvider):
         try:
             try:
                 content = await asyncio.wait_for(
-                    asyncio.to_thread(self._sync_call, client, full_messages), timeout=timeout
+                    asyncio.to_thread(self._sync_call, client, full_messages, max_tokens), timeout=timeout
                 )
             except asyncio.TimeoutError:
                 managed_key.mark_failure()
@@ -5576,7 +5579,7 @@ class CerebrasProvider(BaseAIProvider):
     name = "Cerebras"
     BASE_URL = "https://api.cerebras.ai/v1/chat/completions"
 
-    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float) -> str:
+    async def _call_with_key(self, managed_key: ManagedKey, system_prompt: str, messages: list, timeout: float, max_tokens: int = 1024) -> str:
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         start = time.time()
         managed_key.in_flight += 1
@@ -5590,7 +5593,7 @@ class CerebrasProvider(BaseAIProvider):
                         "Authorization": f"Bearer {managed_key.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={"model": self.model, "messages": full_messages, "max_tokens": 1024},
+                    json={"model": self.model, "messages": full_messages, "max_tokens": max_tokens},
                     timeout=timeout,
                 )
             except httpx.TimeoutException:
@@ -5625,7 +5628,7 @@ class AIRouter:
         self.providers = providers
         self.timeout = timeout
 
-    async def chat(self, system_prompt: str, messages: list) -> str:
+    async def chat(self, system_prompt: str, messages: list, max_tokens: int = 1024) -> str:
         errors = []
         tried_any = False
         for provider in self.providers:
@@ -5633,7 +5636,7 @@ class AIRouter:
                 continue
             tried_any = True
             try:
-                result = await provider.chat(system_prompt, messages, timeout=self.timeout)
+                result = await provider.chat(system_prompt, messages, timeout=self.timeout, max_tokens=max_tokens)
                 logger.info(f"AIRouter: {provider.name} সফল হয়েছে।")
                 return result
             except AIProviderError as e:
@@ -6060,7 +6063,7 @@ class AIQueueManager:
 
     async def _worker(self, worker_id: int):
         while True:
-            system_prompt, messages, future, enqueued_at, router = await self.queue.get()
+            system_prompt, messages, future, enqueued_at, router, max_tokens = await self.queue.get()
             queue_wait = time.time() - enqueued_at
             ai_stats_manager.record_queue_wait(queue_wait)  # Phase 10: Statistics Manager
             if queue_wait > 2:
@@ -6071,7 +6074,7 @@ class AIQueueManager:
                     try:
                         # Phase 45: user_id-এর ভিত্তিতে ইতিমধ্যে ঠিক করা router (নিজস্ব Key
                         # থাকলে সেটা, নাহলে গ্লোবাল শেয়ার্ড ai_router) ব্যবহার হয়।
-                        result = await router.chat(system_prompt, messages)
+                        result = await router.chat(system_prompt, messages, max_tokens=max_tokens)
                         if not future.done():
                             future.set_result(result)
                     except Exception as e:  # noqa: BLE001 — যেকোনো এরর future-এ পাঠিয়ে দেওয়া, worker যাতে না মরে
@@ -6083,17 +6086,18 @@ class AIQueueManager:
                 self.total_processed += 1
                 self.queue.task_done()
 
-    async def submit(self, system_prompt: str, messages: list, user_id: Optional[int] = None) -> str:
+    async def submit(self, system_prompt: str, messages: list, user_id: Optional[int] = None, max_tokens: int = 1024) -> str:
         """রিকোয়েস্ট সারিতে জমা দিয়ে ফলাফলের জন্য অপেক্ষা করে (caller-এর জন্য এটা স্বচ্ছ —
         দেখতে সরাসরি ai_router.chat()-এর মতোই লাগে, ভেতরে কিউয়িং/লিমিটেড-কনকারেন্সি চলে)।
         Phase 45: user_id দিলে সেই ইউজারের নিজস্ব API Key (থাকলে) দিয়ে বানানো router ব্যবহার
-        হয়, না দিলে বা নিজস্ব Key না থাকলে গ্লোবাল শেয়ার্ড router ব্যবহার হয় (আগের আচরণ)।"""
+        হয়, না দিলে বা নিজস্ব Key না থাকলে গ্লোবাল শেয়ার্ড router ব্যবহার হয় (আগের আচরণ)।
+        Phase 20-fix: max_tokens pass-through — /codeplan-এর মতো বড় JSON আউটপুটের জন্য।"""
         await self._ensure_workers()
         router = _build_user_ai_router(user_id)
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         self.total_queued += 1
-        await self.queue.put((system_prompt, messages, future, time.time(), router))
+        await self.queue.put((system_prompt, messages, future, time.time(), router, max_tokens))
         return await future
 
     def stats(self) -> dict:
@@ -6118,7 +6122,7 @@ ai_queue_manager = AIQueueManager()
 # এই দুটো ফাংশনই কল করে, তাই ভেতরের ইমপ্লিমেন্টেশন Groq থেকে AIRouter-এ, এবং এখন Phase 9-এ
 # Async Queue Manager + Hard Timeout-এ বদলে দিলেও বাকি কোনো ফিচার/কমান্ডে পরিবর্তন লাগেনি।
 
-async def ask_ai(system_prompt: str, user_text: str, use_cache: bool = False, user_id: Optional[int] = None) -> str:
+async def ask_ai(system_prompt: str, user_text: str, use_cache: bool = False, user_id: Optional[int] = None, max_tokens: int = 1024) -> str:
     """
     একাধিক ফ্রি AI Provider ব্যবহার করে (OpenRouter -> Groq -> Cerebras, স্বয়ংক্রিয় fallback সহ),
     Phase 9-এর Async Queue Manager দিয়ে (non-blocking, সীমিত-কনকারেন্সি) প্রসেস হয়। পুরো
@@ -6136,6 +6140,10 @@ async def ask_ai(system_prompt: str, user_text: str, use_cache: bool = False, us
     Phase 45: user_id দিলে সেই ইউজারের নিজস্ব API Key (কোনো প্রোভাইডারে থাকলে) ব্যবহার হয় —
     বটের শেয়ার্ড Key Pool স্পর্শ করে না। user_id না দিলে (ডিফল্ট None) আগের মতোই সবসময়
     গ্লোবাল শেয়ার্ড router ব্যবহার হয়, তাই পুরোনো কোনো call site ভাঙে না।
+
+    Phase 20-fix: max_tokens (ডিফল্ট 1024) এখন AI কল পর্যন্ত pass-through হয়। /codeplan-এর
+    মতো বড় JSON আউটপুট দরকার হলে কলার max_tokens=4000 দিয়ে ডাকে — অন্য call site-গুলো
+    default 1024-ই ব্যবহার করে, তাই কোনো আচরণ বদলায় না।
     """
     if use_cache:
         cached = await ai_response_cache.get(system_prompt, user_text)
@@ -6147,7 +6155,7 @@ async def ask_ai(system_prompt: str, user_text: str, use_cache: bool = False, us
 
     try:
         result = await asyncio.wait_for(
-            ai_queue_manager.submit(system_prompt, [{"role": "user", "content": user_text}], user_id=user_id),
+            ai_queue_manager.submit(system_prompt, [{"role": "user", "content": user_text}], user_id=user_id, max_tokens=max_tokens),
             timeout=AI_REQUEST_HARD_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -10651,7 +10659,9 @@ async def coding_analyze_and_plan(raw_request: str) -> dict:
         '{"project_name": "সংক্ষিপ্ত নাম", "stack": "ভাষা/ফ্রেমওয়ার্ক", '
         '"tasks": [{"title": "ছোট শিরোনাম", "description": "এই ধাপে কী কোড লাগবে তার বিবরণ"}]}'
     )
-    reply = await ask_ai(system_prompt, raw_request)
+    # Phase 20-fix: প্ল্যান JSON-এর জন্য বড় max_tokens — নাহলে 1024 টোকেনে রেসপন্স কাটা পড়ে
+    # json.loads fail হয় এবং fallback প্ল্যান দেখানো হয়।
+    reply = await ask_ai(system_prompt, raw_request, max_tokens=4000)
     parsed = _extract_json_object(reply)
     if not parsed or not isinstance(parsed.get("tasks"), list) or not parsed["tasks"]:
         return {
@@ -10905,7 +10915,9 @@ async def autonomous_generate_plan(user_id: int, user_text: str) -> dict:
         }
 
     try:
-        reply = await ask_ai(system, user_text)
+        # Phase 20-fix: /codeplan-এর JSON প্ল্যান আঁটার জন্য বড় max_tokens দরকার — নাহলে
+        # 1024 টোকেনে রেসপন্স মাঝপথে কাটা পড়ে, json.loads fail হয়ে deterministic fallback দেখায়।
+        reply = await ask_ai(system, user_text, max_tokens=4000)
         parsed = _extract_json_object(reply)
         tasks = parsed.get("tasks") if isinstance(parsed, dict) else None
         if not isinstance(tasks, list) or not tasks:
@@ -15814,7 +15826,16 @@ def _build_mcp_server():
     # stateless_http + json_response: SSE/streaming বাদ দিয়ে সাধারণ request/response ব্যবহার
     # করে — কিছু হোস্টিং প্ল্যাটফর্মের প্রক্সি স্ট্রিমিং/SSE ঠিকভাবে সাপোর্ট করে না, তাই এই
     # মোডে চালানো অনেক বেশি নির্ভরযোগ্য (Claude-এর সাথে কানেকশন silently ভেঙে যাওয়া ঠেকায়)।
-    mcp_app = FastMCP("rohan-youtube-bot-brain", stateless_http=True, json_response=True)
+    # Fix (double path-mount): streamable_http_app() ডিফল্টভাবে ভেতরেই /mcp পাথে নিজের রুট
+    # বসায়। বাইরে Mount("/mcp", ...)-এর সাথে মিলিয়ে সেটা আবার /mcp হয়ে যেত, ফলে বাইরে থেকে
+    # /mcp-এ হিট করলে ভেতরের অ্যাপ খালি path পেত আর 404 দিত। তাই ভেতরের অ্যাপের streamable
+    # path-টা root ("/")-এ বসানো হচ্ছে, যেটা বাইরের Mount-এর prefix-strip করা path-এর সাথে মেলে।
+    mcp_app = FastMCP(
+        "rohan-youtube-bot-brain",
+        stateless_http=True,
+        json_response=True,
+        streamable_http_path="/",
+    )
 
     @mcp_app.tool()
     def add_knowledge(category: str, title: str, content: str, priority: int = 5,
@@ -16427,9 +16448,12 @@ button{{width:100%;padding:10px;background:#111;color:#fff;border:0;border-radiu
             routes.append(Route("/oauth/token", oauth_token, methods=["POST"]))
             async def oauth_debug_mcp_test(request):
                 # শুধু অ্যাডমিন টোকেন দিয়েই চলবে। এটা বাইরের নেটওয়ার্ক/প্রক্সি এড়িয়ে
-                # সরাসরি আমাদের নিজের প্রসেসের ভেতর থেকেই /mcp-কে একটা আসল initialize
+                # সরাসরি আমাদের নিজের প্রসেসের ভেতর থেকেই MCP-কে একটা আসল initialize
                 # রিকোয়েস্ট পাঠায় — এতে বোঝা যায় বাগটা আমাদের কোডে নাকি বাইরের হোস্টিং/
                 # প্রক্সি লেভেলে।
+                # Fix: এখন streamable_http_app() root ("/")-এ রুট করে (streamable_http_path="/"),
+                # তাই ভেতরের অ্যাপের সরাসরি টেস্টে "/mcp" নয়, "/" পাথে পাঠাতে হবে — কারণ বাইরে
+                # Mount("/mcp", ...) prefix-strip করে ভেতরের অ্যাপকে "/" পথই দেয়।
                 if request.query_params.get("token", "") != MCP_ADMIN_TOKEN:
                     return PlainTextResponse("forbidden", status_code=403)
                 import httpx as _httpx
@@ -16439,7 +16463,7 @@ button{{width:100%;padding:10px;background:#111;color:#fff;border:0;border-radiu
                         transport=transport, base_url="http://testserver", timeout=15.0
                     ) as client:
                         resp = await client.post(
-                            "/mcp",
+                            "/",
                             json={
                                 "jsonrpc": "2.0",
                                 "id": 1,
