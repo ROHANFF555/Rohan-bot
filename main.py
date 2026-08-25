@@ -426,6 +426,14 @@ VOICE_MALE = "bn-BD-PradeepNeural"
 VOICE_FEMALE = "bn-BD-NabanitaNeural"
 SPEED_OPTIONS = {"slow": "-20%", "normal": "+0%", "fast": "+20%"}
 
+# ---- Phase 46: ভয়েস/গতি পছন্দের বৈধ মানের তালিকা (single source of truth) ----
+# inline বাটনের callback_data ("voice_male", "speed_fast" …) থেকে আসা মানটা DB-তে লেখার
+# আগে এই তালিকা দিয়ে যাচাই করা হয়। আগে যাচাই ছাড়াই সরাসরি users.voice / users.speed-এ
+# লেখা হতো, আর speed-এর ক্ষেত্রে তারপরে labels[choice] করতে গিয়ে KeyError ছুঁড়ত —
+# অর্থাৎ crash-এর আগেই ভুয়া মানটা কমিট হয়ে যেত (users.speed-এ কোনো CHECK constraint নেই)।
+VOICE_CHOICES = ("male", "female")
+SPEED_LABELS_BN = {"slow": "ধীর", "normal": "স্বাভাবিক", "fast": "দ্রুত"}
+
 FREE_DAILY_LIMIT = 15
 
 # ---- Phase 4: Premium System ----
@@ -9113,14 +9121,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("voice_"):
         choice = data.replace("voice_", "")
+        # Phase 46: বৈধ মান না হলে DB-তে কিছুই লেখা হবে না — আগে ভুয়া মান কমিট হয়ে
+        # যেত এবং ইউজারকে মিথ্যা নিশ্চিতকরণ ("মেয়ে কণ্ঠ সেট হয়েছে") দেখানো হতো।
+        if choice not in VOICE_CHOICES:
+            await safe_edit_message_text(
+                query,
+                "⚠️ কণ্ঠের এই অপশনটা চেনা যাচ্ছে না। নিচের বাটন থেকে আবার বেছে নিন।",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("ছেলে কণ্ঠ", callback_data="voice_male"),
+                    InlineKeyboardButton("মেয়ে কণ্ঠ", callback_data="voice_female"),
+                ]]),
+            )
+            return
         update_field(user_id, "voice", choice)
         label = "ছেলে কণ্ঠ" if choice == "male" else "মেয়ে কণ্ঠ"
         await safe_edit_message_text(query, f"কণ্ঠ সেট করা হয়েছে: {label}", reply_markup=back_to_settings_kb)
     elif data.startswith("speed_"):
         choice = data.replace("speed_", "")
+        # Phase 46: আগে এখানে labels[choice] অজানা মানে KeyError ছুঁড়ত — সেটা error_handler
+        # পর্যন্ত পৌঁছে ইউজারকে "অপ্রত্যাশিত সমস্যা" দেখাত, অথচ তার আগেই update_field()
+        # ভুয়া মানটা users.speed-এ কমিট করে ফেলত। এখন প্রথমে যাচাই, তারপরে লেখা।
+        if choice not in SPEED_LABELS_BN:
+            await safe_edit_message_text(
+                query,
+                "⚠️ গতির এই অপশনটা চেনা যাচ্ছে না। নিচের বাটন থেকে আবার বেছে নিন।",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("ধীর", callback_data="speed_slow"),
+                    InlineKeyboardButton("স্বাভাবিক", callback_data="speed_normal"),
+                    InlineKeyboardButton("দ্রুত", callback_data="speed_fast"),
+                ]]),
+            )
+            return
         update_field(user_id, "speed", choice)
-        labels = {"slow": "ধীর", "normal": "স্বাভাবিক", "fast": "দ্রুত"}
-        await safe_edit_message_text(query, f"গতি সেট করা হয়েছে: {labels[choice]}", reply_markup=back_to_settings_kb)
+        await safe_edit_message_text(
+            query, f"গতি সেট করা হয়েছে: {SPEED_LABELS_BN[choice]}", reply_markup=back_to_settings_kb
+        )
 
     elif data == "settings_open_voice":
         keyboard = [[
@@ -9168,6 +9203,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             section_text = await localize(user_id, f"{title}\n━━━━━━━━━━━━━━━\n{body}")
             await safe_edit_message_text(query, section_text, reply_markup=back_kb)
+        else:
+            # Phase 46: অজানা সেকশনে আগে চুপচাপ কিছুই হতো না — ইউজার বাটন চেপে কোনো
+            # ফিডব্যাকই পেত না। এখন মূল মেনুতে ফিরিয়ে দেওয়া হয়।
+            text, markup = await build_menu_root(user_id)
+            await safe_edit_message_text(query, text, reply_markup=markup)
 
     elif data == "lang_auto":
         set_user_language_auto(user_id)
@@ -9183,6 +9223,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id, f"✅ বটের ভাষা সেট করা হলো: {UI_LANG_CHOICES[lang_code]}"
             )
             await safe_edit_message_text(query, confirm, reply_markup=back_to_settings_kb)
+        else:
+            # Phase 46: অজানা ভাষা কোডে আগে নিঃশব্দ no-op হতো (কোনো ফিডব্যাক নেই)।
+            # DB-তে ভুয়া language মান লেখাও হয়নি, কিন্তু ইউজার জানত না কী হয়েছে —
+            # এখন ভাষা বাছাইয়ের তালিকাটা আবার দেখানো হয়।
+            text, markup = build_lang_picker_view()
+            await safe_edit_message_text(query, text, reply_markup=markup)
 
     # ---- Phase 5: Admin Control Panel ----
     elif data.startswith("adm_"):
