@@ -6888,6 +6888,7 @@ _BRAIN_STAGE_LABEL_BN = {
     "documentation": "Documentation Engine",
     "decision": "Decision Engine",
     "ai": "AI (এই মোডে বন্ধ)",
+    "coding_task_ai_fallback": "Coding Agent-এর AI fallback (এই মোডে বন্ধ)",
 }
 
 
@@ -7152,9 +7153,25 @@ async def _phase44_browse_and_answer(
         return ""
 
 
-def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
+def build_no_api_stuck_message(
+    decision: Optional[Dict[str, Any]] = None,
+    *,
+    stage: Optional[str] = None,
+    detail: str = "",
+) -> str:
     """No API Call Mode-এ Brain OS সরাসরি উত্তর দিতে না পারলে ইউজারকে এই মেসেজটা পাঠানো হয় —
-    কোন ধাপে আটকে গেছে সেটা জানিয়ে আরও তথ্য চায়, কোনো AI কল হয় না।"""
+    কোন ধাপে আটকে গেছে সেটা জানিয়ে আরও তথ্য চায়, কোনো AI কল হয় না।
+
+    ``decision``-dict আকারের পুরোনো কলগুলো বজায় রেখে coding workflow-এর জন্য ``stage`` ও
+    ``detail`` keyword-ও নেওয়া হয়। ফলে সাধারণ চ্যাট এবং Coding Agent—দুটো পথেই একই Phase 43
+    ব্যাখ্যাটি পুনরায় ব্যবহার করা যায়।
+    """
+    decision = dict(decision or {})
+    if stage is not None:
+        decision["stage"] = stage
+    if detail:
+        decision["detail"] = detail
+
     stage = str(decision.get("stage") or "unknown")
     stage_label = _BRAIN_STAGE_LABEL_BN.get(stage, stage)
     confidence = decision.get("confidence", 0.0)
@@ -7162,6 +7179,8 @@ def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
         confidence = float(confidence)
     except (TypeError, ValueError):
         confidence = 0.0
+    detail_text = str(decision.get("detail") or "").strip()
+    detail_note = f"\n📌 বিস্তারিত: {detail_text}\n" if detail_text else ""
     browse_note = ""
     if stage == "ai":
         # এই স্টেজে পৌঁছালে মানে Brain OS নিজের ডাটাবেজে কিছু পায়নি, তাই Phase 44 অনুযায়ী
@@ -7175,6 +7194,7 @@ def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
         "🧪 আপনার চ্যাটে No API Call Mode চালু আছে — তাই এই প্রশ্নের উত্তর দিতে কোনো AI API কল করা হয়নি।\n\n"
         f"⚠️ Brain OS এই প্রশ্নের জন্য নিজের কাছে যথেষ্ট নিশ্চিত তথ্য পায়নি।\n"
         f"আটকে গেছে: {stage_label} ধাপে (confidence: {confidence:.2f})\n"
+        f"{detail_note}"
         f"{browse_note}\n"
         "দয়া করে প্রশ্নটা আরেকটু ভেঙে/সহজ করে লিখুন, অথবা বিষয়টা সম্পর্কে একটু বেশি তথ্য দিন — "
         "তাহলে Brain OS আবার চেষ্টা করবে।\n"
@@ -10840,6 +10860,10 @@ def delete_project(project_id: int, user_id: int) -> bool:
 
 AUTONOMOUS_MAX_RETRIES = 3
 AUTONOMOUS_MAX_PLAN_TASKS = CODE_TASK_MAX_TASKS
+NO_API_CODING_BLOCKED_MESSAGE = (
+    "⚠️ No API Mode চালু আছে — Brain OS একা এই কাজ করতে পারছে না। "
+    "`/noapimode off` দিয়ে বন্ধ করুন অথবা Brain OS-এ এই ধরনের প্রজেক্টের knowledge/pattern যোগ করুন।"
+)
 
 
 def _autonomous_request_kind(user_text: str) -> dict:
@@ -10879,6 +10903,22 @@ async def autonomous_analyze_request(user_id: int, user_text: str) -> dict:
 async def autonomous_generate_plan(user_id: int, user_text: str) -> dict:
     """PLAN: structured JSON plan using only compact Phase 19 context."""
     analysis = await autonomous_analyze_request(user_id, user_text)
+    if is_no_api_mode(user_id):
+        logger.info("No API Mode active — Coding Agent-এর AI প্ল্যান জেনারেশন স্কিপ হলো।")
+        return {
+            "project_name": user_text[:50] or "Autonomous Project",
+            "stack": "unknown",
+            "tasks": [{
+                "title": "No API Mode চালু আছে",
+                "description": "AI ছাড়া প্ল্যান বানানো যায়নি। /noapimode off দিয়ে বন্ধ করুন, অথবা Brain OS-এ যথেষ্ট knowledge/pattern নেই এই ধরনের প্রজেক্টের জন্য।",
+                "depends_on_seq": None,
+                "target_files": [],
+            }],
+            "analysis": analysis,
+            "fallback": True,
+            "no_api_blocked": True,
+        }
+
     ctx = analysis.get("context", {})
     system = (
         "You are a senior software architect. Create a safe, dependency-aware implementation plan. "
@@ -11231,6 +11271,27 @@ def autonomous_retry_allowed(task:dict) -> bool:
 
 async def autonomous_implement_task(project:dict,task:dict) -> dict:
     """IMPLEMENT: generate only this task's artifact using Smart Context; no project-wide prompt."""
+    # /codeplan tasks use this Phase 20 path directly (rather than the legacy
+    # process_next_code_task path), so enforce the same per-user no-API policy here too.
+    if is_no_api_mode(project.get("user_id", 0)):
+        stuck_msg = build_no_api_stuck_message(
+            stage="coding_task_ai_fallback",
+            detail=f"ধাপ: {task['title']}",
+        )
+        blocked_code = f"[No API Mode: {stuck_msg}]"
+        save_task_result(task["id"], blocked_code, source="no_api_blocked", status="failed")
+        autonomous_set_task_state(task["id"], "failed", "coding_task_ai_fallback", stuck_msg)
+        task.update({
+            "code": blocked_code,
+            "source": "no_api_blocked",
+            "status": "failed",
+            "workflow_stage": "coding_task_ai_fallback",
+            "last_error": stuck_msg,
+            "no_api_blocked": True,
+        })
+        brain_os_metrics["no_api_stuck"] += 1
+        return task
+
     autonomous_set_task_state(task["id"],"in_progress","implement","")
     task["status"]="in_progress"; task["workflow_stage"]="implement"
     try:
@@ -11882,7 +11943,10 @@ async def codeplan_command(update:Update,context:ContextTypes.DEFAULT_TYPE):
     thinking=await update.message.reply_text("🤖 Autonomous Agent: ANALYZE → PLAN চলছে…")
     try:
         plan=await autonomous_generate_plan(user_id,text); pid=autonomous_save_plan(user_id,plan); project=get_project(pid,owner_id=user_id)
-        await send_long_text(update,"✅ Autonomous plan saved.\n\n"+build_project_status_text(project)+"\n\n/codenext দিয়ে implementation শুরু করুন।")
+        if plan.get("no_api_blocked"):
+            await update.message.reply_text(NO_API_CODING_BLOCKED_MESSAGE)
+        else:
+            await send_long_text(update,"✅ Autonomous plan saved.\n\n"+build_project_status_text(project)+"\n\n/codenext দিয়ে implementation শুরু করুন।")
     except Exception as e:
         logger.warning("Phase 20 /codeplan failed: %s",e); await update.message.reply_text("Autonomous plan তৈরি করতে সমস্যা হয়েছে।")
     finally:
@@ -11931,6 +11995,20 @@ async def process_next_code_task(project: dict):
         logger.warning("Phase 17 coding Decision Engine fallback: %s", e)
 
     brain_os_metrics["ai_routes"] += 1
+    if is_no_api_mode(project.get("user_id", 0)):
+        stuck_msg = build_no_api_stuck_message(
+            stage="coding_task_ai_fallback",
+            detail=f"ধাপ: {task['title']}",
+        )
+        blocked_code = f"[No API Mode: {stuck_msg}]"
+        save_task_result(task["id"], blocked_code, source="no_api_blocked", status="failed")
+        task["code"] = blocked_code
+        task["source"] = "no_api_blocked"
+        task["status"] = "failed"
+        task["no_api_blocked"] = True
+        brain_os_metrics["no_api_stuck"] += 1
+        return task
+
     all_tasks = get_project_tasks(project["id"])
     done_titles = [t["title"] for t in all_tasks if t["status"] == "done"][-CODE_CONTEXT_PREV_TASKS:]
     context_note = ("আগের সম্পন্ন ধাপ: " + "; ".join(done_titles)) if done_titles else "এটাই প্রথম ধাপ।"
@@ -13465,7 +13543,9 @@ async def codenext_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result=await autonomous_run_next(project)
         else:
             result=await process_next_code_task(project)
-        if result and result.get("status")=="done":
+        if result and result.get("no_api_blocked"):
+            await update.message.reply_text(NO_API_CODING_BLOCKED_MESSAGE)
+        elif result and result.get("status")=="done":
             try:
                 imp=result.get("phase28_impact",{}) or {}
                 phase28_record_outcome(int(project.get("id",0)),imp.get("expected_files",[]),"success",False,imp,int(imp.get("risk_score",0)),str(imp.get("risk_level","LOW")))
