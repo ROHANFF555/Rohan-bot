@@ -28,7 +28,43 @@ Rohan-bot-এর প্রতিটা তথ্যবহ উত্তরের 
 
 ---
 
-## ২. ব্যাজ ফরম্যাট (৪ রকম)
+## ২. স্বয়ংক্রিয় Priority (Automatic priority)
+
+প্রতিটা তথ্যবহ উত্তরের জন্য বট এই ক্রমে উৎস খোঁজে — **কোনো আলাদা `/search` কমান্ডের দরকার নেই**:
+
+```
+ইউজারের প্রশ্ন
+      │
+      ▼
+1️⃣ 💾 Database check ────────────── পেলে → 💾 Database (ব্যাজসহ উত্তর)
+      │ না পেলে
+      ▼
+2️⃣ 🌐 Browser Search (automatic) ── পেলে → 🌐 Browser / 🔄 Hybrid (ব্যাজসহ উত্তর)
+      │ না পেলে
+      ▼
+3️⃣ 🔵 Groq API (fallback) ─────────── → 🔵 Groq API (ব্যাজসহ উত্তর)
+```
+
+- **Step 2** সম্পূর্ণ স্বয়ংক্রিয়: DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) →
+  Wikipedia (English)। No API Call Mode বন্ধ থাকলে কাঁচা ওয়েব-তথ্য AI দিয়ে গুছিয়ে লেখা হয়
+  (তখন ব্যাজ 🔄 Hybrid); চালু থাকলে কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
+- **No API Call Mode** চালু থাকলে Step 3 (🔵 Groq API) বাদ যায় — DB ও (ফ্রি) Browser-এ কিছু
+  না পেলে "আটকে গেছে" মেসেজ যায়।
+
+এই একই ক্রম সব হ্যান্ডলারে প্রযোজ্য: **chat, joke, quote, translate, grammar, rewrite,
+tone, summarize**।
+
+উদাহরণ:
+
+```
+User: "বাংলাদেশের প্রধানমন্ত্রী কে?"
+↓ (automatic priority)
+Database check → (না থাকলে) Browser search → (তাও না থাকলে) Groq API
+```
+
+---
+
+## ৩. ব্যাজ ফরম্যাট (৪ রকম)
 
 ### `minimal` — শুধু উৎস
 ```
@@ -41,7 +77,7 @@ _উৎস: 🌐 ব্রাউজার সার্চ | 🔵 Groq API_
 _[🕐 2026-08-26 04:58 UTC] [🔗 1 লিংক] [নির্ভুলতা: 🟢 উচ্চ]_
 ```
 
-### `full` — `/search`-এর ডিফল্ট
+### `full` — সোর্স-গুরুত্বপূর্ণ উত্তরের জন্য (কনফিগে যেকোনো কমান্ডে বসানো যায়)
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 উৎস তথ্য
@@ -78,36 +114,18 @@ _[🕐 2026-08-26 04:58 UTC] [🔗 1 লিংক] [নির্ভুলতা:
 
 ---
 
-## ৩. কোন কমান্ডে কী ব্যাজ
+## ৪. কোন হ্যান্ডলারে কী ব্যাজ
 
-| কমান্ড | উৎস | ফরম্যাট |
+| হ্যান্ডলার | উৎস | ফরম্যাট |
 |---|---|---|
-| `/search প্রশ্ন` | 🌐 Browser → 💾 Database → 🔵 Groq (ফলব্যাক ক্রম) | `full` |
-| সাধারণ চ্যাট (Brain OS direct) | 💾 Database (cache hit) | `compact` |
-| সাধারণ চ্যাট (AI রুট) | 🔵 Groq API | `compact` |
-| সাধারণ চ্যাট (shared cache hit) | 💾 Database (cache hit) | `compact` |
-| সাধারণ চ্যাট (Browse Search) | 🌐 Browser বা 🔄 Hybrid | `compact` |
-| `/joke`, `/quote` | 🔵 Groq API (confidence 0.95) | `compact` |
-| `/translate`, `/grammar`, `/rewrite`, `/tone`, `/summarize` | 🔵 Groq API, অথবা cache hit হলে 💾 Database | `compact` |
+| সাধারণ চ্যাট (DB direct) | 💾 Database (cache hit) | `compact` |
+| সাধারণ চ্যাট (Browser Search) | 🌐 Browser বা 🔄 Hybrid | `compact` |
+| সাধারণ চ্যাট (Groq API / shared cache) | 🔵 Groq API, ক্যাশ-হিটে 💾 Database | `compact` |
+| `/joke`, `/quote` | 💾 Database (ক্যাশ) → 🌐 Browser → 🔵 Groq API | `compact` |
+| `/translate`, `/grammar`, `/rewrite`, `/tone`, `/summarize` | 💾 Database (ক্যাশ) → 🌐 Browser → 🔵 Groq API | `compact` |
 | এরর / usage-নির্দেশিকা মেসেজ | কোনো ব্যাজ নয় | — |
 
----
-
-## ৪. `/search` কমান্ড
-
-```
-/search বাংলাদেশের রাজধানী কোনটি?
-```
-
-খোঁজার ক্রম (প্রথম যেখানে আসল তথ্য মেলে সেটাই ফেরত যায়):
-
-1. **🌐 Browser Search** — `browse_web_search()`: DuckDuckGo Instant Answer →
-   Wikipedia (ইউজারের ভাষা) → Wikipedia (English)। AI দিয়ে গুছিয়ে লেখা হলে ব্যাজ হয় 🔄 Hybrid।
-2. **💾 Database** — Brain OS Decision Engine-এর direct উত্তর (cache hit হিসেবে চিহ্নিত)।
-3. **🔵 Groq API** — সাধারণ AI কল। *No API Call Mode চালু থাকলে এই ধাপ বাদ যায়।*
-
-কিছুই না মিললে বন্ধুত্বপূর্ণ "পাওয়া যায়নি" মেসেজ যায় — তখন কোনো ব্যাজ বসে না
-(কারণ তখন কোনো উৎসই নেই)।
+> সব হ্যান্ডলারেই priority একই: **💾 Database → 🌐 Browser → 🔵 Groq API**।
 
 ---
 
@@ -119,10 +137,10 @@ rohan_bot/
 └── utils/
     └── source_tracker.py        # DataSource, SourceMetadata, ব্যাজ তৈরি, format_with_source
 main.py                          # Phase 47: লোডার + make_source_metadata/attach_source_badge
-                                 #           + /search কমান্ড + হ্যান্ডলার ইন্টিগ্রেশন
+                                 #           + _automatic_browse_answer (automatic Browser Search)
+                                 #           + প্রতিটা হ্যান্ডলারে DB→Browser→API priority
 docs/SOURCE_ATTRIBUTION.md       # এই ফাইল
-tests/test_source_attribution.py        # ১২০ unit + integration টেস্ট
-tests/test_browser_search_feature.py    # ৫৩ browser-search টেস্ট
+tests/test_source_attribution.py # unit + integration + automatic-browse টেস্ট
 ```
 
 `rohan_bot/utils/source_tracker.py` ইচ্ছে করেই Telegram/AI/DB থেকে **সম্পূর্ণ স্বাধীন** —
@@ -139,7 +157,7 @@ from rohan_bot.utils.source_tracker import (
 meta = build_metadata("browser", confidence_score=0.85, query="ঢাকা কোন দেশে?")
 meta.add_url("https://bn.wikipedia.org/wiki/ঢাকা")
 meta.add_secondary("groq")          # AI দিয়ে গুছিয়ে লেখা → 🔄 Hybrid
-reply = format_with_source(answer, meta, command="search")   # lang="bn" ডিফল্ট
+reply = format_with_source(answer, meta, command="chat")   # lang="bn" ডিফল্ট
 ```
 
 ### `main.py`-এ ব্যবহার (হ্যান্ডলারের ভেতরে)
@@ -160,7 +178,7 @@ await send_long_text(update, attach_source_badge(reply, metadata, "joke", attrib
 
 ```python
 COMMAND_SETTINGS = {
-    "search": {"enabled": True, "format": "full"},
+    "chat":   {"enabled": True, "format": "compact"},
     "joke":   {"enabled": True, "format": "compact"},
     ...
 }
@@ -180,7 +198,7 @@ COMMAND_SETTINGS = {
 
 ## ৭. নিরাপত্তা ও সীমা
 
-* **ব্যাজ বন্ধ থাকলে তথ্য হারায় না** — Phase 44-এর Browse Search উত্তরে তখন পুরোনো
+* **ব্যাজ বন্ধ থাকলে তথ্য হারায় না** — Browse Search উত্তরে তখন পুরোনো
   `🔗 উৎস: ... / 🔎 চেক করা হয়েছে: ...` ফুটারই দেখানো হয়।
 * **প্যাকেজ না থাকলে বট ভাঙে না** — শুধু `main.py` কপি করে চালালে
   `SOURCE_ATTRIBUTION_AVAILABLE = False` হয়ে যায়, ব্যাজ বন্ধ থাকে, বাকি সব আগের মতো চলবে।
@@ -194,11 +212,10 @@ COMMAND_SETTINGS = {
 ## ৮. টেস্ট চালানো
 
 ```bash
-python3 tests/test_browser_search_feature.py      # ৫৩ টেস্ট (Phase 1)
-python3 tests/test_source_attribution.py          # ১২০ টেস্ট (Phase 2)
+python3 tests/test_source_attribution.py          # unit + integration + automatic-browse টেস্ট
 
 # অথবা pytest দিয়ে
-python3 -m pytest tests/test_browser_search_feature.py tests/test_source_attribution.py -q
+python3 -m pytest tests/test_source_attribution.py -q
 ```
 
 নতুন কোডের coverage: **`rohan_bot/` = 100%** (`python3 -m coverage run --source=rohan_bot ...`)।
@@ -211,6 +228,5 @@ python3 -m pytest tests/test_browser_search_feature.py tests/test_source_attribu
 
 ```
 🌐 Phase 44 Browse Search দিয়ে উত্তর দেওয়া হয়েছে: 12 বার
-🔎 Phase 47 /search দিয়ে উত্তর দেওয়া হয়েছে: 5 বার
 🏷️ Source Attribution: ✅ চালু (ডিফল্ট ফরম্যাট: compact)
 ```

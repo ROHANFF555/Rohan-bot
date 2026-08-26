@@ -42,8 +42,6 @@ DEFAULT_CONFIDENCE: Dict[str, float] = {
 #: এখানে নেই এমন কমান্ড `format_with_source(..., command=...)` দিলে গ্লোবাল
 #: ডিফল্ট (চালু, DEFAULT_BADGE_FORMAT) পাবে।
 COMMAND_SETTINGS: Dict[str, Dict[str, Any]] = {
-    # /search — ইচ্ছে করেই পুরো বিস্তারিত ব্যাজ: এটাই ওয়েব-সোর্স দেখানোর মূল কমান্ড।
-    "search": {"enabled": True, "format": "full"},
     # সাধারণ চ্যাট — ছোট ব্যাজ, প্রতি মেসেজে বড় বক্স বিরক্তিকর হতো।
     "chat": {"enabled": True, "format": "compact"},
     "joke": {"enabled": True, "format": "compact"},
@@ -131,7 +129,7 @@ def resolve_command_settings(
     """একটা কমান্ডের কার্যকর সেটিংস ফেরত দেয় (কমান্ড-specific না থাকলে গ্লোবাল ডিফল্ট)।
 
     Args:
-        command: কমান্ডের নাম, স্ল্যাশসহ বা স্ল্যাশ ছাড়া দুটোই চলে (``"search"``/``"/search"``)।
+        command: কমান্ডের নাম, স্ল্যাশসহ বা স্ল্যাশ ছাড়া দুটোই চলে (``"joke"``/``"/joke"``)।
         settings: `load_settings()`-এর ফলাফল; না দিলে নিজেই লোড করে।
 
     Returns:
