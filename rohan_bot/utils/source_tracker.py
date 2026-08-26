@@ -17,7 +17,7 @@ Usage::
 
     meta = SourceMetadata(DataSource.BROWSER, confidence_score=0.85)
     meta.add_url("https://bn.wikipedia.org/wiki/ঢাকা")
-    reply = format_with_source(answer_text, meta, command="search")
+    reply = format_with_source(answer_text, meta, command="chat")
 """
 
 from __future__ import annotations
@@ -382,7 +382,7 @@ class SourceMetadata:
         return head + "\n_[" + "] [".join(meta_bits) + "]_"
 
     def _full_badge(self, lang: str) -> str:
-        """বক্স-স্টাইল পূর্ণাঙ্গ ব্যাজ — /search-এর মতো সোর্স-গুরুত্বপূর্ণ উত্তরের জন্য।"""
+        """বক্স-স্টাইল পূর্ণাঙ্গ ব্যাজ — সোর্স-গুরুত্বপূর্ণ উত্তরের জন্য (full format)।"""
         bn = lang == "bn"
         emoji, level = confidence_level(self.confidence_score, lang=lang)
         stamp = self.timestamp.strftime(_TIMESTAMP_FORMAT)
@@ -666,7 +666,7 @@ def format_with_source(
         metadata: `SourceMetadata`; None হলে শুধু মূল লেখা ফেরত যায়।
         format_type: ``minimal``/``compact``/``full``/``detailed``; None দিলে কমান্ডের ডিফল্ট।
         lang: ``"bn"`` (ডিফল্ট) হলে বাংলা লেবেল।
-        command: কমান্ডের নাম (``"search"``/``"/search"``) — per-command enable/format এর জন্য।
+        command: কমান্ডের নাম (``"chat"``/``"/chat"``) — per-command enable/format এর জন্য।
         settings: `load_settings()`-এর ফলাফল (বারবার লোড এড়াতে)।
 
     Returns:

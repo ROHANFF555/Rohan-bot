@@ -1,6 +1,6 @@
 """Phase 2 — Data Source Attribution ফিচারের টেস্ট।
 
-দুই অংশ:
+তিন অংশ:
 
   1. **Unit** — `rohan_bot/utils/source_tracker.py` ও `rohan_bot/config.py` সরাসরি import
      করে (এগুলো Telegram/AI/DB থেকে স্বাধীন): DataSource enum, coerce_source,
@@ -8,10 +8,13 @@
      চারটে ব্যাজ ফরম্যাট (minimal/compact/full/detailed), বাংলা-ইংরেজি লেবেল,
      to_dict/from_dict, browse/decision রূপান্তর, `format_with_source`, env override।
 
-  2. **Integration** — আসল main.py কপি করে চালিয়ে দেখা হয় প্রতিটা হ্যান্ডলার সত্যিই
-     ঠিক উৎসের ব্যাজ বসাচ্ছে কিনা: /joke, /quote, /translate (cache miss vs hit),
-     /summarize, chat_general (Brain OS direct / AI / general cache), এবং ফিচার বন্ধ
-     থাকলে উত্তর অপরিবর্তিত থাকে কিনা।
+  2. **Integration (handlers)** — আসল main.py কপি করে চালিয়ে দেখা হয় প্রতিটা হ্যান্ডলার
+     (chat/joke/quote/translate/grammar/rewrite/tone/summarize) **DB → Browser → API**
+     priority মেনে চলছে কিনা, এবং সোর্স-ব্যাজ সঠিক উৎস দেখাচ্ছে কিনা।
+
+  3. **Integration (browse layer)** — DuckDuckGo/Wikipedia লেয়ার + স্বয়ংক্রিয়
+     (automatic) Browse Search (`_automatic_browse_answer`) — কোনো আলাদা /search কমান্ড
+     ছাড়াই — এর ফেক-HTTP টেস্ট।
 
 চালানো যায়:
     python3 tests/test_source_attribution.py
@@ -32,6 +35,8 @@ import time
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
+
+import httpx
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -107,6 +112,105 @@ class FakeContext:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# ফেক HTTP লেয়ার — DuckDuckGo/Wikipedia কল আটকে নিয়ন্ত্রিত উত্তর দেয়
+# (automatic Browse Search লেয়ারের integration টেস্টের জন্য)।
+# ---------------------------------------------------------------------------
+class FakeResponse:
+    def __init__(self, status_code: int = 200, payload=None, broken_json: bool = False):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self._broken = broken_json
+
+    def json(self):
+        if self._broken:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return self._payload
+
+
+class FakeHTTPClient:
+    DDG_URL = "api.duckduckgo.com"
+    WIKI_API = "/w/api.php"
+    WIKI_SUMMARY = "/api/rest_v1/page/summary/"
+
+    def __init__(self, ddg=None, wiki_search=None, wiki_summary=None):
+        self.ddg = ddg
+        self.wiki_search = wiki_search
+        self.wiki_summary = wiki_summary
+        self.calls: list = []
+
+    def _route(self, url: str, params):
+        if self.DDG_URL in url:
+            return self.ddg
+        if self.WIKI_SUMMARY in url:
+            return self.wiki_summary
+        if self.WIKI_API in url or (params or {}).get("action") == "opensearch":
+            return self.wiki_search
+        return FakeResponse(404, {})
+
+    async def get(self, url, params=None, timeout=None):
+        self.calls.append({"url": url, "params": dict(params or {}), "timeout": timeout})
+        entry = self._route(url, params)
+        if entry is None:
+            return FakeResponse(404, {})
+        if callable(entry):
+            entry = entry(url, params)
+        if isinstance(entry, Exception):
+            raise entry
+        if asyncio.iscoroutine(entry):
+            entry = await entry
+        return entry
+
+    def urls(self) -> list:
+        return [call["url"] for call in self.calls]
+
+    def hit(self, needle: str) -> bool:
+        return any(needle in call["url"] for call in self.calls)
+
+    def query_sent(self, needle: str = DDG_URL) -> str:
+        for call in self.calls:
+            if needle in call["url"]:
+                return call["params"].get("q") or call["params"].get("search") or ""
+        return ""
+
+
+def ddg_ok(text="ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।", source="Wikipedia",
+           url="https://bn.wikipedia.org/wiki/ঢাকা"):
+    return FakeResponse(
+        200, {"AbstractText": text, "AbstractSource": source, "AbstractURL": url}
+    )
+
+
+def ddg_empty():
+    return FakeResponse(
+        200, {"AbstractText": "", "Answer": "", "Definition": "", "RelatedTopics": []}
+    )
+
+
+def ddg_answer(value="42"):
+    return FakeResponse(200, {"AbstractText": "", "Answer": value})
+
+
+def ddg_related(text="সংশ্লিষ্ট টপিক থেকে পাওয়া তথ্য।"):
+    return FakeResponse(200, {"AbstractText": "", "RelatedTopics": [{"Text": text}]})
+
+
+def wiki_titles(title="ঢাকা"):
+    return FakeResponse(
+        200, [title, [title], ["https://bn.wikipedia.org/wiki/ঢাকা"], [""]]
+    )
+
+
+def wiki_no_titles():
+    return FakeResponse(200, ["", [], [], []])
+
+
+def wiki_summary(extract="ঢাকা বাংলাদেশের রাজধানী।", url="https://bn.wikipedia.org/wiki/ঢাকা"):
+    return FakeResponse(
+        200, {"extract": extract, "content_urls": {"desktop": {"page": url}}}
+    )
 
 
 # ===========================================================================
@@ -404,7 +508,7 @@ class SourceMetadataTests(unittest.TestCase):
         )
         started = time.perf_counter()
         for _ in range(500):
-            st.format_with_source("উত্তর", meta, command="search")
+            st.format_with_source("উত্তর", meta, command="chat")
         per_call_ms = (time.perf_counter() - started) / 500 * 1000
         self.assertLess(per_call_ms, 10.0, f"per-call overhead {per_call_ms:.3f} ms")
 
@@ -599,7 +703,7 @@ class FormatWithSourceTests(unittest.TestCase):
         "format": "compact",
         "lang": "bn",
         "commands": {
-            "search": {"enabled": True, "format": "full"},
+            "detail": {"enabled": True, "format": "full"},
             "joke": {"enabled": True, "format": "compact"},
             "quiet": {"enabled": False, "format": "compact"},
         },
@@ -619,7 +723,7 @@ class FormatWithSourceTests(unittest.TestCase):
         out = st.format_with_source(
             "ফলাফল",
             st.SourceMetadata("browser"),
-            command="search",
+            command="detail",
             settings=self.SETTINGS,
         )
         self.assertIn("📊 উৎস তথ্য", out)
@@ -629,12 +733,12 @@ class FormatWithSourceTests(unittest.TestCase):
             "ফলাফল",
             st.SourceMetadata("browser"),
             format_type="minimal",
-            command="search",
+            command="detail",
             settings=self.SETTINGS,
         )
         self.assertEqual(
             out, "ফলাফল\n\n🌐 ব্রাউজার সার্চ"
-        )  # /search-এর "full" নয়, minimal-ই চলল
+        )  # "full" নয়, minimal-ই চলল
 
     def test_disabled_command_returns_text_unchanged(self):
         meta = st.SourceMetadata("groq")
@@ -742,8 +846,8 @@ class ConfigOverrideTests(unittest.TestCase):
         self.assertTrue(settings["enabled"])
         self.assertEqual(settings["format"], "compact")
         self.assertEqual(settings["lang"], "bn")
-        self.assertTrue(settings["commands"]["search"]["enabled"])
-        self.assertEqual(settings["commands"]["search"]["format"], "full")
+        self.assertTrue(settings["commands"]["chat"]["enabled"])
+        self.assertEqual(settings["commands"]["chat"]["format"], "compact")
 
     def test_global_disable_via_env(self):
         with patch.dict(os.environ, {"SOURCE_ATTRIBUTION_ENABLED": "false"}):
@@ -771,7 +875,7 @@ class ConfigOverrideTests(unittest.TestCase):
             settings["commands"]["quote"]["enabled"]
         )  # স্ল্যাশ নিজে থেকেই বাদ
         self.assertTrue(settings["commands"]["ocr"]["enabled"])
-        self.assertTrue(settings["commands"]["search"]["enabled"])
+        self.assertTrue(settings["commands"]["chat"]["enabled"])
 
     def test_env_bool_parsing(self):
         for raw, expected in (
@@ -799,8 +903,8 @@ class ConfigOverrideTests(unittest.TestCase):
     def test_resolve_command_settings_accepts_slash(self):
         settings = attribution_config.load_settings()
         self.assertEqual(
-            attribution_config.resolve_command_settings("/search", settings),
-            attribution_config.resolve_command_settings("search", settings),
+            attribution_config.resolve_command_settings("/joke", settings),
+            attribution_config.resolve_command_settings("joke", settings),
         )
 
 
@@ -869,11 +973,35 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.main.ai_response_cache._store.clear()
 
     def call(self, handler, args=None, user_id=USER_ID, message_text=""):
+        """হ্যান্ডলার চালায় — ডিফল্টে Browse Search অফ (নেটওয়ার্ক-মুক্ত, deterministic)।"""
         update = FakeUpdate(user_id, message_text)
+        ctx = FakeContext(args)
+        with patch.object(self.main, "quota_guard", new=AsyncMock(return_value=True)), patch.object(
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
+        ):
+            run(handler(update, ctx))
+        return update, "\n".join(update.message.sent)
+
+    def call_raw(self, handler, args=None, user_id=USER_ID):
+        """Browse Search নিজে নিয়ন্ত্রণ করতে চাইলে এই হেল্পার (auto-mock করে না)।"""
+        update = FakeUpdate(user_id)
         ctx = FakeContext(args)
         with patch.object(self.main, "quota_guard", new=AsyncMock(return_value=True)):
             run(handler(update, ctx))
         return update, "\n".join(update.message.sent)
+
+    def install_http(self, **routes) -> FakeHTTPClient:
+        """main.py-এর `get_http_client()`-কে ফেক HTTP ক্লায়েন্ট দিয়ে প্রতিস্থাপন করে।"""
+        client = FakeHTTPClient(**routes)
+        patcher = patch.object(
+            self.main, "get_http_client", new=AsyncMock(return_value=client)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return client
+
+    def browse(self, query: str, lang_hint: str = ""):
+        return run(self.main.browse_web_search(query, lang_hint=lang_hint))
 
     # ---------------- /joke, /quote ----------------
     def test_joke_shows_groq_badge(self):
@@ -1022,7 +1150,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ), patch.object(
             self.main, "ask_ai", new=AsyncMock(return_value="AI-এর উত্তর।")
         ), patch.object(
@@ -1044,7 +1172,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ), patch.object(
             self.main, "ask_ai", new=ask_ai
         ), patch.object(
@@ -1064,7 +1192,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ), patch.object(
             self.main, "ask_ai", new=ask_ai
         ), patch.object(
@@ -1076,7 +1204,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.assertIn("🔵 Groq API", text)
 
     def test_chat_browse_answer_has_hybrid_badge_once(self):
-        """Browse পথের ব্যাজ (_phase44_browse_and_answer-এর ভেতরে) যেন দুইবার না বসে।"""
+        """Browse পথের ব্যাজ (_automatic_browse_answer-এর ভেতরে) যেন দুইবার না বসে।"""
         decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
         browse_answer = (
             "ওয়েব থেকে পাওয়া উত্তর।\n\n_উৎস: 🌐 ব্রাউজার সার্চ | 🔵 Groq API_\n"
@@ -1086,7 +1214,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
             self.main,
-            "_phase44_browse_and_answer",
+            "_automatic_browse_answer",
             new=AsyncMock(return_value=browse_answer),
         ), patch.object(
             self.main, "should_show_own_key_hint", return_value=False
@@ -1185,7 +1313,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
 
     def test_attribution_helpers_report_state(self):
         self.assertTrue(self.main.source_attribution_enabled("chat"))
-        self.assertTrue(self.main.source_attribution_enabled("search"))
+        self.assertTrue(self.main.source_attribution_enabled("joke"))
         self.assertEqual(self.main.attribution_lang(USER_ID), "bn")
         self.assertIn(
             self.main.source_attribution_settings()["format"],
@@ -1289,7 +1417,8 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
     def test_brain_status_reports_attribution_state(self):
         status = self.main.build_brain_status_text()
         self.assertIn("Source Attribution", status)
-        self.assertIn("/search", status)
+        self.assertIn("Browse Search", status)
+        self.assertNotIn("/search", status)
 
     # ---------------- quota / এরর-পথ: কোথাও ভুয়া ব্যাজ বসবে না ----------------
     QUOTA_COMMANDS = (
@@ -1336,6 +1465,8 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "quota_guard", new=AsyncMock(return_value=True)
         ), patch.object(
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
+        ), patch.object(
             self.main, "ask_ai", new=AsyncMock(return_value="রিপ্লাইয়ের সারমর্ম।")
         ):
             run(self.main.summarize_command(update, FakeContext([])))
@@ -1369,7 +1500,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ), patch.object(
             self.main, "ask_ai_with_history", new=AsyncMock(return_value="AI উত্তর।")
         ), patch.object(
@@ -1387,7 +1518,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ):
             text = self.chat("No API প্রশ্ন")
         self.assertTrue(text.strip())
@@ -1483,43 +1614,13 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.assertIn("স্টিকি উত্তর।", text)
         self.assertIn("💾 ডাটাবেজ", text)
 
-    def test_search_command_survives_sticky_thinking_message(self):
-        class StickySent:
-            async def delete(self):
-                raise RuntimeError("cannot delete")
-
-        class StickyMessage(FakeMessage):
-            async def reply_text(self, text, **kwargs):
-                self.sent.append(text)
-                return StickySent()
-
-        update = FakeUpdate(USER_ID)
-        update.message = StickyMessage(USER_ID)
-        decision = {
-            "strategy": "direct",
-            "stage": "knowledge",
-            "confidence": 0.9,
-            "payload": {"content": "স্টিকি সার্চ উত্তর।"},
-        }
-        with patch.object(
-            self.main, "quota_guard", new=AsyncMock(return_value=True)
-        ), patch.object(
-            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
-        ), patch.object(
-            self.main, "browse_web_search", new=AsyncMock(return_value=None)
-        ):
-            run(self.main.search_command(update, FakeContext(["স্টিকি", "সার্চ"])))
-        text = "\n".join(update.message.sent)
-        self.assertIn("🔎 সার্চ ফলাফল", text)
-        self.assertIn("💾 ডাটাবেজ", text)
-
     def test_chat_own_key_hint_comes_before_source_badge(self):
         """নিজস্ব Key-র অনুস্মারক আগে, উৎস-ব্যাজ সবার শেষে (বিশ্বাসযোগ্যতার ফুটার)।"""
         decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "_phase44_browse_and_answer", new=AsyncMock(return_value="")
+            self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
         ), patch.object(
             self.main, "ask_ai_with_history", new=AsyncMock(return_value="AI উত্তর।")
         ), patch.object(
@@ -1530,6 +1631,361 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             text = self.chat("Key hint প্রশ্ন")
         self.assertIn("🔑 Key যোগ করুন।", text)
         self.assertLess(text.index("🔑 Key যোগ করুন।"), text.index("_উৎস:"))
+
+    # ================= DB → Browser → API priority (Phase 47) =================
+    def test_chat_database_first_priority(self):
+        """DB-তে সরাসরি উত্তর থাকলে Browser/API কাউকেই ডাকা হবে না।"""
+        decision = {
+            "strategy": "direct",
+            "stage": "knowledge",
+            "confidence": 0.9,
+            "payload": {"content": "ডাটাবেজের উত্তর।"},
+        }
+        browse = AsyncMock(return_value="ব্রাউজারের উত্তর।")
+        ask_ai = AsyncMock(return_value="AI-এর উত্তর।")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main, "ask_ai", new=ask_ai
+        ), patch.object(
+            self.main, "ask_ai_with_history", new=AsyncMock()
+        ):
+            text = self.chat("ডাটাবেজ প্রশ্ন")
+        self.assertIn("ডাটাবেজের উত্তর।", text)
+        self.assertIn("💾 ডাটাবেজ", text)
+        browse.assert_not_awaited()
+        ask_ai.assert_not_awaited()
+
+    def test_chat_browser_second_priority(self):
+        """DB-তে না পেলে (automatic) Browser Search দ্বিতীয় ধাপে চলে, API-তে যাবে না।"""
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
+        browse = AsyncMock(return_value="ব্রাউজারের উত্তর।")
+        ask_ai = AsyncMock(return_value="AI-এর উত্তর।")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main, "ask_ai", new=ask_ai
+        ), patch.object(
+            self.main, "ask_ai_with_history", new=AsyncMock()
+        ), patch.object(
+            self.main, "should_show_own_key_hint", return_value=False
+        ):
+            text = self.chat("ব্রাউজার প্রশ্ন")
+        self.assertIn("ব্রাউজারের উত্তর।", text)
+        ask_ai.assert_not_awaited()
+
+    def test_chat_api_fallback_third(self):
+        """DB ও Browser দুটোই খালি হলে তবেই 🔵 Groq API (তৃতীয় ধাপ)।"""
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
+        browse = AsyncMock(return_value="")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main,
+            "ask_ai_with_history",
+            new=AsyncMock(return_value="AI-এর উত্তর।"),
+        ), patch.object(
+            self.main, "should_show_own_key_hint", return_value=False
+        ):
+            text = self.chat("API প্রশ্ন")
+        self.assertIn("AI-এর উত্তর।", text)
+        self.assertIn("🔵 Groq API", text)
+
+    def test_all_handlers_same_priority_db_browser_api(self):
+        """chat-এর মতোই joke/quote/translate/grammar/rewrite/tone/summarize — সবার
+        priority একই: 💾 DB (cache) → 🌐 Browser → 🔵 Groq API।"""
+        handlers = (
+            ("joke_command", []),
+            ("quote_command", []),
+            ("translate_command", ["english", "লেখা"]),
+            ("grammar_command", ["লেখা"]),
+            ("rewrite_command", ["লেখা"]),
+            ("tone_command", ["formal", "লেখা"]),
+            ("summarize_command", ["লেখা"]),
+        )
+        for name, args in handlers:
+            handler = getattr(self.main, name)
+            # Step 1: DB (cache hit) আগে
+            with patch.object(
+                self.main.ai_response_cache, "get", new=AsyncMock(return_value="ক্যাশ উত্তর।")
+            ), patch.object(
+                self.main, "_automatic_browse_answer", new=AsyncMock(return_value="ব্রাউজার উত্তর।")
+            ), patch.object(
+                self.main, "ask_ai", new=AsyncMock(return_value="AI উত্তর।")
+            ):
+                _update, text = self.call_raw(handler, list(args))
+            self.assertIn("ক্যাশ উত্তর।", text, msg=name)
+            self.assertIn("💾 ডাটাবেজ", text, msg=name)
+
+            # Step 2: Browser দ্বিতীয় (cache miss হলে)
+            with patch.object(
+                self.main.ai_response_cache, "get", new=AsyncMock(return_value=None)
+            ), patch.object(
+                self.main, "_automatic_browse_answer", new=AsyncMock(return_value="ব্রাউজার উত্তর।")
+            ), patch.object(
+                self.main, "ask_ai", new=AsyncMock()
+            ):
+                _update, text = self.call_raw(handler, list(args))
+            self.assertIn("ব্রাউজার উত্তর।", text, msg=name)
+
+            # Step 3: Groq API শেষ (DB ও Browser খালি হলে)
+            with patch.object(
+                self.main.ai_response_cache, "get", new=AsyncMock(return_value=None)
+            ), patch.object(
+                self.main, "_automatic_browse_answer", new=AsyncMock(return_value="")
+            ), patch.object(
+                self.main, "ask_ai", new=AsyncMock(return_value="AI উত্তর।")
+            ):
+                _update, text = self.call_raw(handler, list(args))
+            self.assertIn("AI উত্তর।", text, msg=name)
+            self.assertIn("🔵 Groq API", text, msg=name)
+
+    def test_browser_search_automatic_no_command_needed(self):
+        """কোনো /search কমান্ড ছাড়াই DB miss-এ Browser Search স্বয়ংক্রিয়ভাবে চলে।"""
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
+        client = self.install_http(ddg=ddg_ok("স্বয়ংক্রিয় ওয়েব তথ্য।"))
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(
+            self.main, "ask_ai", new=AsyncMock(return_value="গুছানো ওয়েব উত্তর।")
+        ), patch.object(
+            self.main, "should_show_own_key_hint", return_value=False
+        ):
+            text = self.chat("স্বয়ংক্রিয় প্রশ্ন")
+        self.assertIn("গুছানো ওয়েব উত্তর।", text)
+        self.assertIn("🌐 ব্রাউজার সার্চ", text)
+        self.assertTrue(client.hit("duckduckgo.com"))
+
+    def test_no_api_mode_skips_browser_and_api(self):
+        """No API Call Mode: DB miss-এ কোনো AI (ব্রাউজার-গুছানো/API) কল হয় না —
+        শুধু ফ্রি Browser Search চেষ্টা হয়; কিছু না পেলে 'আটকে গেছে' মেসেজ যায়।"""
+        self.main.set_no_api_mode(USER_ID, True)
+        self.addCleanup(self.main.set_no_api_mode, USER_ID, False)
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.0}
+        browse = AsyncMock(return_value="")
+        ask_ai = AsyncMock(return_value="AI-এর উত্তর।")
+        ask_ai_history = AsyncMock(return_value="AI-এর উত্তর।")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main, "ask_ai", new=ask_ai
+        ), patch.object(
+            self.main, "ask_ai_with_history", new=ask_ai_history
+        ):
+            text = self.chat("No API প্রশ্ন")
+        self.assertTrue(text.strip())
+        self.assertIn("No API Call Mode চালু", text)
+        ask_ai.assert_not_awaited()
+        ask_ai_history.assert_not_awaited()
+        self.assertNotIn("_উৎস:", text)
+
+    def test_source_badges_correct_for_each_priority(self):
+        """প্রতিটা priority-র উৎস-ব্যাজ সঠিক: 💾 Database / 🌐 Browser / 🔵 Groq।"""
+        # DB → 💾
+        decision = {
+            "strategy": "direct",
+            "stage": "knowledge",
+            "confidence": 0.9,
+            "payload": {"content": "ডাটাবেজের উত্তর।"},
+        }
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ):
+            text = self.chat("ডাটাবেজ প্রশ্ন")
+        self.assertIn("💾 ডাটাবেজ", text)
+        self.assertNotIn("🌐 ব্রাউজার সার্চ", text)
+        self.assertNotIn("🔵 Groq API", text)
+
+        # Browser → 🌐
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
+        browse = AsyncMock(return_value="ব্রাউজারের উত্তর।\n\n_উৎস: 🌐 ব্রাউজার সার্চ_")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main, "should_show_own_key_hint", return_value=False
+        ):
+            text = self.chat("ব্রাউজার প্রশ্ন")
+        self.assertIn("🌐 ব্রাউজার সার্চ", text)
+        self.assertNotIn("💾 ডাটাবেজ", text)
+
+        # API → 🔵
+        decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
+        browse = AsyncMock(return_value="")
+        with patch.object(
+            self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
+        ), patch.object(self.main, "_automatic_browse_answer", new=browse), patch.object(
+            self.main,
+            "ask_ai_with_history",
+            new=AsyncMock(return_value="AI-এর উত্তর।"),
+        ), patch.object(
+            self.main, "should_show_own_key_hint", return_value=False
+        ):
+            text = self.chat("API প্রশ্ন")
+        self.assertIn("🔵 Groq API", text)
+        self.assertNotIn("🌐 ব্রাউজার সার্চ", text)
+
+    # ================= automatic Browse Search লেয়ার =================
+    def test_browse_duckduckgo_valid_query_returns_abstract(self):
+        self.install_http(ddg=ddg_ok())
+        result = run(self.main._browse_duckduckgo("বাংলাদেশের রাজধানী"))
+        self.assertEqual(result["text"], "ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।")
+        self.assertEqual(result["url"], "https://bn.wikipedia.org/wiki/ঢাকা")
+
+    def test_browse_duckduckgo_answer_and_related_fields(self):
+        self.install_http(ddg=ddg_answer("42"))
+        self.assertEqual(run(self.main._browse_duckduckgo("6 * 7"))["text"], "42")
+
+        self.install_http(ddg=ddg_related())
+        result = run(self.main._browse_duckduckgo("অচেনা প্রশ্ন"))
+        self.assertEqual(result["text"], "সংশ্লিষ্ট টপিক থেকে পাওয়া তথ্য।")
+
+    def test_browse_duckduckgo_failures_return_none(self):
+        self.install_http(ddg=ddg_empty())
+        self.assertIsNone(run(self.main._browse_duckduckgo("খালি ফলাফল")))
+
+        self.install_http(ddg=FakeResponse(500, {}))
+        self.assertIsNone(run(self.main._browse_duckduckgo("সার্ভার এরর")))
+
+        self.install_http(ddg=FakeResponse(429, {}))
+        self.assertIsNone(run(self.main._browse_duckduckgo("রেট লিমিট")))
+
+        self.install_http(ddg=httpx.TimeoutException("timed out"))
+        self.assertIsNone(run(self.main._browse_duckduckgo("টাইমআউট")))
+
+        self.install_http(ddg=FakeResponse(200, broken_json=True))
+        self.assertIsNone(run(self.main._browse_duckduckgo("ভাঙা JSON")))
+
+    def test_browse_duckduckgo_truncates_long_text(self):
+        self.install_http(ddg=ddg_ok(text="ক" * 5000))
+        result = run(self.main._browse_duckduckgo("বড় লেখা"))
+        self.assertEqual(len(result["text"]), 1800)
+
+    def test_browse_wikipedia_opensearch_then_summary(self):
+        client = self.install_http(
+            wiki_search=wiki_titles("ঢাকা"), wiki_summary=wiki_summary()
+        )
+        result = run(self.main._browse_wikipedia("ঢাকা", lang="bn"))
+        self.assertEqual(result["text"], "ঢাকা বাংলাদেশের রাজধানী।")
+        self.assertEqual(result["url"], "https://bn.wikipedia.org/wiki/ঢাকা")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_browse_wikipedia_failures_return_none(self):
+        self.install_http(wiki_search=wiki_no_titles(), wiki_summary=wiki_summary())
+        self.assertIsNone(run(self.main._browse_wikipedia("অস্তিত্বহীন", lang="bn")))
+
+        self.install_http(
+            wiki_search=wiki_titles("ঢাকা"), wiki_summary=FakeResponse(404, {})
+        )
+        self.assertIsNone(run(self.main._browse_wikipedia("ঢাকা", lang="bn")))
+
+    def test_browse_web_search_empty_query_no_http(self):
+        client = self.install_http(
+            ddg=ddg_ok(), wiki_search=wiki_titles(), wiki_summary=wiki_summary()
+        )
+        self.assertIsNone(self.browse(""))
+        self.assertIsNone(self.browse("   \n\t  "))
+        self.assertEqual(client.calls, [])
+
+    def test_browse_web_search_duckduckgo_hit_skips_wikipedia(self):
+        client = self.install_http(
+            ddg=ddg_ok(), wiki_search=wiki_titles(), wiki_summary=wiki_summary()
+        )
+        result = self.browse("বাংলাদেশের রাজধানী")
+        self.assertEqual(result["matched_source"], "DuckDuckGo Instant Answer")
+        self.assertFalse(client.hit("wikipedia.org"))
+
+    def test_browse_web_search_language_hints(self):
+        bn_client = self.install_http(
+            ddg=ddg_empty(), wiki_search=wiki_titles(), wiki_summary=wiki_summary()
+        )
+        result = self.browse("ইতিহাস", lang_hint="Bengali")
+        self.assertEqual(result["matched_source"], "Wikipedia (bn)")
+        self.assertTrue(any("bn.wikipedia.org" in u for u in bn_client.urls()))
+
+        en_client = self.install_http(
+            ddg=ddg_empty(), wiki_search=wiki_titles("Dhaka"), wiki_summary=wiki_summary()
+        )
+        result = self.browse("capital of Bangladesh", lang_hint="English")
+        self.assertEqual(result["matched_source"], "Wikipedia (en)")
+        self.assertTrue(any("en.wikipedia.org" in u for u in en_client.urls()))
+
+    def test_browse_web_search_bn_falls_back_to_en(self):
+        calls = {"bn": 0, "en": 0}
+
+        def search_route(url, _params):
+            lang = "bn" if url.startswith("https://bn.") else "en"
+            calls[lang] += 1
+            return wiki_no_titles() if lang == "bn" else wiki_titles("Dhaka")
+
+        self.install_http(
+            ddg=ddg_empty(), wiki_search=search_route, wiki_summary=wiki_summary()
+        )
+        result = self.browse("Dhaka history", lang_hint="bangla")
+        self.assertEqual(result["matched_source"], "Wikipedia (en)")
+        self.assertEqual(calls, {"bn": 1, "en": 1})
+
+    def test_browse_web_search_records_tried_sources_on_failure(self):
+        client = self.install_http(
+            ddg=ddg_empty(), wiki_search=wiki_no_titles(), wiki_summary=wiki_summary()
+        )
+        self.assertIsNone(self.browse("এমন কিছু যা কোথাও নেই", lang_hint="বাংলা"))
+        self.assertEqual(len(client.calls), 3)
+
+    def test_automatic_browse_empty_when_nothing_found(self):
+        self.install_http(
+            ddg=ddg_empty(), wiki_search=wiki_no_titles(), wiki_summary=wiki_summary()
+        )
+        self.assertEqual(
+            run(self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)), ""
+        )
+
+    def test_automatic_browse_hybrid_badge_when_ai_organizes(self):
+        self.install_http(ddg=ddg_ok("কাঁচা তথ্য।"))
+        with patch.object(
+            self.main, "ask_ai", new=AsyncMock(return_value="গুছানো উত্তর।")
+        ):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)
+            )
+        self.assertIn("গুছানো উত্তর।", answer)
+        self.assertIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+
+    def test_automatic_browse_raw_when_no_api_mode(self):
+        self.main.set_no_api_mode(USER_ID, True)
+        self.addCleanup(self.main.set_no_api_mode, USER_ID, False)
+        self.install_http(ddg=ddg_ok("কাঁচা তথ্য।"))
+        ask_ai = AsyncMock()
+        with patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", True)
+            )
+        ask_ai.assert_not_awaited()
+        self.assertIn("কাঁচা তথ্য।", answer)
+        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
+        self.assertNotIn("🔵 Groq API", answer)
+
+    def test_automatic_browse_swallows_errors(self):
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            self.assertEqual(
+                run(self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)),
+                "",
+            )
+
+    def test_automatic_browse_legacy_footer_when_attribution_disabled(self):
+        with patch.dict(os.environ, {"SOURCE_ATTRIBUTION_ENABLED": "0"}):
+            self.install_http(ddg=ddg_ok("কাঁচা তথ্য।"))
+            with patch.object(
+                self.main, "ask_ai", new=AsyncMock(return_value="গুছানো উত্তর।")
+            ):
+                answer = run(
+                    self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)
+                )
+        self.assertIn("গুছানো উত্তর।", answer)
+        self.assertIn("🔗 উৎস: https://bn.wikipedia.org/wiki/ঢাকা", answer)
+        self.assertIn("🔎 চেক করা হয়েছে:", answer)
+        self.assertNotIn("📊 উৎস তথ্য", answer)
 
 
 if __name__ == "__main__":
