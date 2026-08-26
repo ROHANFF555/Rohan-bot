@@ -12,7 +12,7 @@ Rohan-bot-এর প্রতিটা তথ্যবহ উত্তরের 
 | চিহ্ন | উৎস | কখন ব্যবহার হয় | ডিফল্ট confidence |
 |---|---|---|---|
 | 🔵 **Groq API** | `GROQ` | LLM (Groq / OpenRouter / Cerebras) দিয়ে তৈরি লেখা | 90% |
-| 🌐 **Browser Search** | `BROWSER` | লাইভ ওয়েব সার্চ — DuckDuckGo Instant Answer, Wikipedia | 85% |
+| 🌐 **Browser Search** | `BROWSER` | লাইভ ওয়েব সার্চ — Tavily (Phase 48, Key থাকলে), DuckDuckGo Instant Answer, Wikipedia | 85% |
 | 💾 **Database** | `DATABASE` | বটের নিজের Brain OS (Knowledge/Pattern/Template Engine) বা Response Cache | 90% |
 | 🔄 **Hybrid** | `HYBRID` | একাধিক উৎস মিলিয়ে (যেমন Browser-এর কাঁচা তথ্য Groq দিয়ে গুছিয়ে লেখা) | 88% |
 
@@ -45,7 +45,8 @@ Rohan-bot-এর প্রতিটা তথ্যবহ উত্তরের 
 3️⃣ 🔵 Groq API (fallback) ─────────── → 🔵 Groq API (ব্যাজসহ উত্তর)
 ```
 
-- **Step 2** সম্পূর্ণ স্বয়ংক্রিয়: DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) →
+- **Step 2** সম্পূর্ণ স্বয়ংক্রিয় (Phase 48): Tavily Real Web Search (`TAVILY_API_KEY` থাকলে) →
+  DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) →
   Wikipedia (English)। No API Call Mode বন্ধ থাকলে কাঁচা ওয়েব-তথ্য AI দিয়ে গুছিয়ে লেখা হয়
   (তখন ব্যাজ 🔄 Hybrid); চালু থাকলে কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
 - **No API Call Mode** চালু থাকলে Step 3 (🔵 Groq API) বাদ যায় — DB ও (ফ্রি) Browser-এ কিছু

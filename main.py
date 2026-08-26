@@ -2134,7 +2134,9 @@ class KnowledgeEngine:
         কখনোই কোনো candidate দিতে পারতো না — যতই তথ্য সেভ করা থাকুক না কেন, সবসময় সরাসরি
         AI-তে চলে যেত। এখন `self._search_engine` (FTS5 ভিত্তিক) দিয়ে আসল সার্চ চালিয়ে
         Decision Engine-এর ranking-এর জন্য উপযুক্ত shape-এ (score 0..1, confidence_score,
-        content) রিটার্ন করে। কোনো এক্সেপশন ছুঁড়ে না — সমস্যা হলে খালি লিস্ট।
+        content) রিটার্ন করে। Phase 48: metadata-য় expires_at (মেয়াদ) থাকা এন্ট্রি মেয়াদ
+        পেরোলে স্কিপ হয় — ক্যাশ-পয়জনিং ঠেকাতে মেয়াদোত্তীর্ণ উত্তর আর Step 1-এ ফেরে না।
+        কোনো এক্সেপশন ছুঁড়ে না — সমস্যা হলে খালি লিস্ট।
         """
         try:
             result = self._search_engine.search(query, page_size=max(1, min(limit, 20)), status="active")
@@ -2142,6 +2144,11 @@ class KnowledgeEngine:
             match_type = result.get("match_type", "empty")
             out: List[Dict[str, Any]] = []
             for row in items:
+                # Phase 48: মেয়াদোত্তীর্ণ (expires_at পেরোনো) এন্ট্রি বাদ — পুরোনো/ভুল
+                # cached উত্তর আর Decision Engine-এর কাছে পৌঁছায় না (ক্যাশ-পয়জনিং ঠেকানো)।
+                if _knowledge_entry_expired(row.get("metadata") if isinstance(row, dict) else None):
+                    logger.debug(f"KnowledgeEngine.search(): মেয়াদোত্তীর্ণ এন্ট্রি স্কিপ (id={row.get('id')})")
+                    continue
                 rank = row.get("rank_score")
                 if match_type in ("exact", "relaxed") and isinstance(rank, (int, float)):
                     # bm25(): সবসময় <=0, |rank| যত বড় তত জোরালো/বহু-টোকেন মিল। তাই
@@ -7094,6 +7101,7 @@ brain_os_metrics = {
     "direct_answers": 0,
     "ai_routes": 0,
     "direct_failures": 0,
+    "time_sensitive_skips": 0,  # Phase 48: time-sensitive প্রশ্নে Step 1 (Database) স্কিপের সংখ্যা
     "no_api_stuck": 0,   # Phase 43: No-API-Call Mode (per-user) চালু থাকা অবস্থায় মোট যতবার Brain OS নিজে থেকে উত্তর দিতে পারেনি (সব ইউজার মিলিয়ে)
     "browse_answers": 0,  # Phase 44: Brain OS ডাটাবেজে না পেয়ে ফ্রি Browse Search (DuckDuckGo/Wikipedia) দিয়ে যতবার উত্তর দিয়েছে
 }
@@ -7134,8 +7142,13 @@ def set_no_api_mode(user_id: int, enabled: bool) -> None:
 # ============================= Phase 44: Browse Search (ফ্রি ওয়েব সার্চ ফলব্যাক) =============================
 # উদ্দেশ্য: ইউজার কিছু জিজ্ঞেস করলে Brain OS প্রথমে নিজের ডাটাবেজে (Knowledge/Pattern/
 # Template/Documentation Engine) খোঁজে (Decision Engine, উপরে আগে থেকেই আছে)। সেখানে
-# ভরসাযোগ্য সরাসরি উত্তর না পেলে, সরাসরি AI API কল করার আগে একবার সম্পূর্ণ ফ্রি (কোনো Key/
-# টাকা লাগে না) Browse Search চেষ্টা করা হয় — DuckDuckGo Instant Answer, তারপর Wikipedia।
+# ভরসায়োগ্য সরাসরি উত্তর না পেলে, সরাসরি AI API কল করার আগে একবার Browse Search চেষ্টা
+# করা হয়। Phase 48 থেকে চেইনের ক্রম: Real Web Search (Tavily — TAVILY_API_KEY থাকলে)
+# → DuckDuckGo Instant Answer (সম্পূর্ণ ফ্রি) → Wikipedia। Tavily একটা আসল ফুল-টেক্সট
+# সার্চ-ইঞ্জিন (LLM-optimized) — DuckDuckGo Instant Answer বাংলা প্রশ্ন-বাক্যে ("... কে?",
+# "... কত?") প্রায় সবসময় খালি ফল দেয়, তাই Key থাকলে প্রথমে Tavily চেষ্টা হয়; Key না
+# থাকলে/কল ব্যর্থ হলে ধীরে পুরোনো ফ্রি-চেইনে (DuckDuckGo → Wikipedia) ফেলব্যাক হয় —
+# তাই পুরোনো আচরণ কোনোভাবেই ভাঙে না।
 # উদাহরণ: "বাংলাদেশের প্রধানমন্ত্রীর নাম কি" — এটা ডাটাবেজে না থাকলে প্রথমে ব্রাউজ সার্চ করবে;
 # তথ্য পেলে তা গুছিয়ে ইউজারকে দেওয়া হবে ও নিজের Knowledge Engine-এ সেভ হয়ে যাবে (পরের বার
 # একই প্রশ্নে আর Browse/AI কোনোটাই লাগবে না)। ব্রাউজ থেকে কিছু না পেলে তখনই স্বাভাবিক AI API
@@ -7143,6 +7156,116 @@ def set_no_api_mode(user_id: int, enabled: bool) -> None:
 # যুক্ত হয়ে যাবে।
 
 BROWSE_SEARCH_TIMEOUT = 8  # সেকেন্ড — DuckDuckGo/Wikipedia প্রতিটা কলের timeout, ধীর হলে দ্রুত বাদ দিয়ে পরেরটায় যায়
+
+
+# ============================= Phase 48: Time-sensitive Query + Real Search =============================
+# সমস্যা: "বর্তমান প্রধানমন্ত্রী/রাষ্ট্রপতি/CEO কে", "দাম কত", "স্কোর" জাতীয় সময়-সংবেদনশীল
+# প্রশ্নের উত্তর Phase 44-এর চেইনে (DuckDuckGo Instant Answer + Wikipedia extract) প্রায়ই
+# পুরোনো/ভুল হয়, আর সেই উত্তর Knowledge Engine-এ সেভ হয়ে ক্যাশ-পয়জনিং করত — একই/কাছাকাছি
+# প্রশ্নে বারবার একই ভুল উত্তর ফিরে আসত, কখনো re-verify হতো না। Phase 48-এর সমাধান তিন স্তরে:
+#   1. Real Web Search আগে (_browse_real_search — Tavily), তারপর পুরোনো ফ্রি-চেইন।
+#   2. time-sensitive প্রশ্নে Step 1 (Database cache) স্কিপ (_phase17_decide-এ) —
+#      যাতে পুরনো cached উত্তর না দেওয়া হয়, সবসময় নতুন করে সার্চ হয়।
+#   3. time-sensitive উত্তর সেভ করলে metadata-তে expires_at (এখন + ৭ দিন) — read path
+#      (KnowledgeEngine.search) মেয়াদোত্তীর্ণ এন্ট্রি স্কিপ করে, ভুল উত্তর আর ফেরে না।
+
+# time-sensitive প্রশ্নের cached উত্তর কত দিন "তাজা" থাকবে (env দিয়ে বদলানো যায়)।
+TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS = max(1, int(os.getenv("TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS", "7") or "7"))
+
+TIME_SENSITIVE_KNOWLEDGE_TTL_SECONDS = TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS * 24 * 60 * 60
+
+#: Tavily Real Web Search — LLM-optimized আসল সার্চ-ইঞ্জিন, ফ্রি টায়ারে মাসে ১,০০০+ কল।
+#: Key (TAVILY_API_KEY) না দিলে ফিচারটাই বন্ধ থাকে — চুপচাপ DuckDuckGo → Wikipedia
+#: চেইনে ফেলব্যাক হয়, বট কখনো crash করে না।
+TAVILY_API_ENDPOINT = "https://api.tavily.com/search"
+
+#: যেসব শব্দ থাকলেই প্রশ্নটা "সময়-সংবেদনশীল" — উত্তর বদলাতে থাকে (দাম, স্কোর, খবর,
+#: দিন-তারিখ) বা বর্তমান-নির্দেশক। ছোট শব্দগুলো whole-token হিসেবে মেলানো হয়
+#: ("আজাদ"-এর ভেতরের "আজ" মিলবে না, কিন্তু স্বাধীন "আজ" টোকেন মিলবে)।
+_TIME_SENSITIVE_WORDS = frozenset({
+    "এখন", "এখনকার", "আজ", "আজকে", "আজকের", "কবে", "কখন", "স্কোর", "খবর", "লাইভ",
+    "ফলাফল", "দাম", "মূল্য",
+    "now", "current", "currently", "today", "tonight", "latest", "recent", "price",
+    "score", "live", "news", "when",
+})
+
+#: বহু-শব্দ/দীর্ঘ অবিস্পষ্ট বাক্যাংশ — substring হিসেবেই মেলানো নিরাপদ।
+_TIME_SENSITIVE_PHRASES = (
+    "বর্তমান", "এই মুহূর্তে", "এ মুহূর্তে", "সর্বশেষ", "সবশেষ", "দাম কত", "কত দাম",
+    "কত মূল্য", "right now", "as of now",
+)
+
+#: পদবি/উপাধি — "এখন কে" জাতীয় প্রশ্নের উত্তর প্রায়ই বদলায় (মেয়াদ, নির্বাচন, নিয়োগ)।
+#: দীর্ঘ ও স্বতন্ত্র শব্দ, তাই substring ম্যাচ নিরাপদ ("প্রধানমন্ত্রীর"-এও মিলবে)।
+_TIME_SENSITIVE_TITLE_PHRASES = (
+    "প্রধানমন্ত্রী", "রাষ্ট্রপতি", "মুখ্যমন্ত্রী", "মন্ত্রী", "চেয়ারম্যান", "চেয়ারপারসন",
+    "সভাপতি", "সম্পাদক", "মেয়র", "সিইও", "ব্যবস্থাপনা পরিচালক", "প্রধান নির্বাহী",
+    "প্রেসিডেন্ট", "গভর্নর", "প্রধান বিচারপতি",
+    "prime minister", "chief minister", "minister", "chairman", "chairperson",
+    "ceo", "cto", "cfo", "mayor", "governor", "chief executive",
+)
+
+#: পদবি-প্রশ্নকে time-sensitive ধরতে সাথে এই "কে/কার/কোন/who" জাতীয় টোকেন থাকতে
+#: হবে — নইলে ইতিহাস-প্রশ্নও ধরা পড়ত ("রবীন্দ্রনাথ কে ছিলেন")।
+_TIME_SENSITIVE_WHO_TOKENS = frozenset({"কে", "কার", "কোন", "কাকে", "who", "whos"})
+
+
+def _is_time_sensitive_query(text: str) -> bool:
+    """প্রশ্নটা সময়-সংবেদনশীল কিনা — "বর্তমান প্রধানমন্ত্রী কে", "রাষ্ট্রপতি কে",
+    "CEO কে", "দাম কত", "স্কোর", "কবে" জাতীয় প্রশ্নে True। এই ধরনের প্রশ্নের cached
+    উত্তর পুরোনো হয়ে যেতে পারে, তাই Phase 48-এ এদের জন্য: Step 1 (Database cache)
+    স্কিপ + সেভ করা উত্তরে expires_at (৭ দিন) + real search-কে অগ্রাধিকার।
+    কোনো এক্সেপশন ছোঁড়ে না — ডিটেকশন ব্যর্থ হলে False (আগের আচরণ)।"""
+    try:
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        # ১) বহু-শব্দের নিশ্চিত বাক্যাংশ আগে (substring ম্যাচ)।
+        if any(phrase in t for phrase in _TIME_SENSITIVE_PHRASES):
+            return True
+        # ২) টোকেন ভাগ করে (যতিচিহ্ন বাদ) ছোট শব্দগুলো whole-token হিসেবে মেলানো হয়।
+        tokens = set(re.findall(r"[\w\u0980-\u09FF]+", t, flags=re.UNICODE))
+        if tokens & _TIME_SENSITIVE_WORDS:
+            return True
+        # ৩) পদবি/উপাধি + "কে/কার/কোন/who" জাতীয় প্রশ্নবোধক — বর্তমান-ধারক প্রশ্ন।
+        if any(title in t for title in _TIME_SENSITIVE_TITLE_PHRASES):
+            if tokens & _TIME_SENSITIVE_WHO_TOKENS:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — ডিটেকশন কখনো চ্যাট-ফ্লো ভাঙবে না
+        return False
+
+
+def _phase48_knowledge_expires_at(user_text: str) -> str:
+    """time-sensitive প্রশ্নের উত্তরের জন্য মেয়াদ (ISO 8601 UTC) — এখন + ৭ দিন;
+    সাধারণ প্রশ্নে খালি স্ট্রিং (মানে মেয়াদ নেই — আগের মতোই দীর্ঘস্থায়ী ক্যাশ)।"""
+    if not _is_time_sensitive_query(user_text):
+        return ""
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=TIME_SENSITIVE_KNOWLEDGE_TTL_SECONDS)
+    ).isoformat(timespec="seconds")
+
+
+def _knowledge_entry_expired(metadata_value: Any, now: Optional[datetime] = None) -> bool:
+    """Knowledge entry-র metadata-য় Phase 48-এর ``expires_at`` থাকলে এবং তা পেরিয়ে
+    গেলে True — মেয়াদোত্তীর্ণ cached উত্তর আর Decision Engine-এর read path (Step 1)
+    থেকে ফেরে না (ক্যাশ-পয়জনিং ঠেকানো)। ``expires_at`` না থাকলে/পার্স না হলে False —
+    পুরোনো এন্ট্রির আচরণ অক্ষত থাকে।"""
+    try:
+        data = metadata_value
+        if isinstance(data, str):
+            data = json.loads(data or "{}")
+        if not isinstance(data, dict):
+            return False
+        raw = str(data.get("expires_at") or "").strip()
+        if not raw:
+            return False
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt <= (now or datetime.now(timezone.utc))
+    except Exception:  # noqa: BLE001 — খারাপ metadata কখনো read path ভাঙবে না
+        return False
 
 
 async def _browse_duckduckgo(query: str) -> Optional[Dict[str, str]]:
@@ -7210,9 +7333,83 @@ async def _browse_wikipedia(query: str, lang: str = "bn") -> Optional[Dict[str, 
         return None
 
 
+def _real_search_configured() -> bool:
+    """Phase 48 Real Web Search (Tavily)-এর Key (TAVILY_API_KEY) সেট করা আছে কিনা।
+    Key না থাকলে ফিচারটা নিঃশব্দে বন্ধ থাকে — পুরোনো DuckDuckGo → Wikipedia চেইনই চলে।"""
+    try:
+        return bool((os.getenv("TAVILY_API_KEY") or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _browse_real_search(query: str, lang_hint: str = "") -> Optional[Dict[str, str]]:
+    """Phase 48: Tavily Real Web Search API (LLM-optimized আসল সার্চ-ইঞ্জিন) থেকে তথ্য
+    আনে — DuckDuckGo Instant Answer নামি QA-ইঞ্জিন, বাংলা প্রশ্ন-বাক্যে খালি ফল দেয়;
+    Tavily ফুল-টেক্সট ওয়েব সার্চ করে তাই ব্রেকিং নিউজ/দাম/স্কোর/নির্বাচনের ফলাফল জাতীয়
+    প্রশ্নেও তাজা ফল পাওয়া যায়।
+
+    - Key (TAVILY_API_KEY env) না থাকলে None — caller তখন পুরোনো ফ্রি-চেইনে ফেলব্যাক করে।
+    - ফলাফলে Tavily-র synthesized answer + শীর্ষ কয়েকটা রেজাল্টের snippet থাকে।
+    - কোনো এক্সেপশন ছোঁড়ে না — ব্যর্থ হলে None (browse_web_search পরের সোর্সে যাবে)।
+    """
+    api_key = (os.getenv("TAVILY_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        client = await get_http_client()
+        resp = await client.post(
+            TAVILY_API_ENDPOINT,
+            json={
+                "api_key": api_key,
+                "query": query,
+                "search_depth": "basic",
+                "include_answer": True,
+                "max_results": 5,
+            },
+            timeout=BROWSE_SEARCH_TIMEOUT,  # আগের মতোই একই timeout — ধীর হলে দ্রুত বাদ
+        )
+        if resp.status_code != 200:
+            logger.debug(f"Phase 48 Tavily Real Search ব্যর্থ: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        answer = str((data.get("answer") or "") or "").strip()
+        results = data.get("results") or []
+        if not isinstance(results, list):
+            results = []
+        # শীর্ষ রেজাল্টগুলোর টাইটেল+snippet জুড়ে দেওয়া হয় — শুধু synthesized answer
+        # খালি/অসম্পূর্ণ হলেও ইউজার বাস্তব উৎসের টুকরো থেকে তথ্য পায়।
+        parts = []
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if title or content:
+                parts.append(f"• {title}: {content}".strip(": "))
+        text = answer
+        if parts:
+            text = (answer + "\n\n" if answer else "") + "\n".join(parts)
+        text = (text or "").strip()
+        if not text:
+            return None
+        first_url = ""
+        if results and isinstance(results[0], dict):
+            first_url = str(results[0].get("url") or "").strip()
+        return {"text": text[:1800], "source": "Tavily Web Search", "url": first_url}
+    except Exception as e:  # noqa: BLE001 — Key ভুল/নেটওয়ার্ক ডাউন → চুপচাপ পরের সোর্স
+        logger.debug(f"Phase 48 Tavily Real Search ব্যর্থ: {e}")
+        return None
+
+
 async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[str, str]]:
     """Brain OS ডাটাবেজে সরাসরি উত্তর না পেলে এখান থেকে ফ্রি Browse Search করা হয়।
-    ক্রম: DuckDuckGo Instant Answer -> Wikipedia (ইউজারের ভাষা অনুযায়ী) -> Wikipedia (ইংরেজি)।
+    ক্রম (Phase 48): Tavily Real Web Search (TAVILY_API_KEY থাকলে) -> DuckDuckGo
+    Instant Answer -> Wikipedia (ইউজারের ভাষা অনুযায়ী) -> Wikipedia (ইংরেজি)।
+    time-sensitive প্রশ্নে ("বর্তমান প্রধানমন্ত্রী কে", "দাম কত" ইত্যাদি) Tavily-কেই
+    অগ্রাধিকার — DDG/Wikipedia শুধু ফেলব্যাক হিসেবে (এগুলোর ফল পুরোনো হতে পারে)।
     প্রথম যেটাতে আসল (খালি নয়) তথ্য পাওয়া যায় সেটাই রিটার্ন হয়। রিটার্ন করা dict-এ 'tried_sources'
     key-এ ক্রমানুসারে সব সোর্স যা চেষ্টা করা হয়েছে (সফল/ব্যর্থ নির্বিশেষে) থাকে — যাতে ইউজার/এডমিন
     দেখতে পারে ঠিক কোন কোন ব্রাউজার/সোর্স চেক করা হয়েছিল। সবগুলো খালি/ব্যর্থ হলে None — তখন
@@ -7222,6 +7419,20 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         return None
 
     tried_sources = []
+    # Phase 48: আসল web search (Tavily) সবার আগে — DDG-র Instant Answer QA-ইঞ্জিন, বাংলা
+    # প্রশ্নে প্রায় খালি ফল দেয়; Tavily ফুল-টেক্সট সার্চ করে। Key না থাকলে ধাপটা পুরো
+    # স্কিপ (tried_sources-এও যোগ হয় না — চেষ্টাই করা হয়নি), ব্যর্থ হলে নিচের পুরোনো
+    # ফ্রি-চেইনে ফেলব্যাক — আগের আচরণ অক্ষত।
+    if _real_search_configured():
+        tried_sources.append("Tavily Web Search")
+        logger.info(f"[Browse Search] Tavily Real Web Search চেষ্টা করা হচ্ছে | query: {query!r}")
+        result = await _browse_real_search(query, lang_hint=lang_hint)
+        if result:
+            logger.info(f"[Browse Search] Tavily থেকে উত্তর পাওয়া গেছে | query: {query!r}")
+            result["tried_sources"] = tried_sources.copy()
+            result["matched_source"] = "Tavily Web Search"
+            return result
+        logger.info(f"[Browse Search] Tavily ব্যর্থ, পুরোনো ফ্রি-চেইনে ফেলব্যাক | query: {query!r}")
 
     tried_sources.append("DuckDuckGo Instant Answer")
     logger.info(f"[Browse Search] DuckDuckGo চেষ্টা করা হচ্ছে | query: {query!r}")
@@ -7267,14 +7478,38 @@ def _phase44_save_browsed_knowledge(user_text: str, answer_text: str, source: st
         content = (answer_text or "").strip()
         if not content:
             return
-        KnowledgeEngine().create(
+        # Phase 48 (ক্যাশ-পয়জনিং ঠেকানো): time-sensitive প্রশ্নের উত্তর চিরদিনের জন্য
+        # সেভ করা হয় না — metadata-তে expires_at (এখন + ৭ দিন) বসে; read path
+        # (KnowledgeEngine.search) মেয়াদ পেরোলে এন্ট্রিটা আর কাউকে দেখায় না, ফলে
+        # পরের বার নতুন করে সার্চই হয়। সাধারণ প্রশ্নে expires_at থাকে না (আগের মতোই)।
+        metadata = {"origin": "browse_search", "source": source, "url": url}
+        expires_at = _phase48_knowledge_expires_at(user_text)
+        if expires_at:
+            metadata["expires_at"] = expires_at
+        engine = KnowledgeEngine()
+        if expires_at:
+            # একই উত্তর আগেও সেভ করা থাকলে create() নতুন রো বানায় না (ডুপ্লিকেট
+            # রিটার্ন করে) — সেক্ষেত্রে পুরোনো এন্ট্রির মেয়াদই নতুন করে বসিয়ে দেওয়া
+            # হয়, যাতে সেটা "চির-মেয়াদোত্তীর্ণ জম্বি" না হয়ে বরং আবার ব্যবহারযোগ্য থাকে।
+            existing = engine.check_duplicate("browse_search", title, content)
+            if existing is not None:
+                try:
+                    old_meta = json.loads(existing.metadata or "{}")
+                    if not isinstance(old_meta, dict):
+                        old_meta = {}
+                except Exception:  # noqa: BLE001
+                    old_meta = {}
+                old_meta["expires_at"] = expires_at
+                engine.update(existing.id, metadata=old_meta)
+                return
+        engine.create(
             category="browse_search",
             title=title,
             content=content,
             tags="auto,browse_search",
             priority=5,
             source="browse_search",
-            metadata={"origin": "browse_search", "source": source, "url": url},
+            metadata=metadata,
             confidence_score=0.75,
             status="active",
         )
@@ -7291,14 +7526,34 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         content = (answer_text or "").strip()
         if not content:
             return
-        KnowledgeEngine().create(
+        # Phase 48 (ক্যাশ-পয়জনিং ঠেকানো): AI-উত্তরেও হ্যালুসিনেশন/পুরোনো তথ্য থাকতে
+        # পারে — time-sensitive প্রশ্নে সেভ করা উত্তরে expires_at (এখন + ৭ দিন) বসে,
+        # যাতে ভুল উত্তর Step 1 থেকে অনন্তকাল রিপিট না হয় (মেয়াদ পেরোলে আবার সার্চ/AI)।
+        metadata = {"origin": "ai_fallback"}
+        expires_at = _phase48_knowledge_expires_at(user_text)
+        if expires_at:
+            metadata["expires_at"] = expires_at
+        engine = KnowledgeEngine()
+        if expires_at:
+            existing = engine.check_duplicate("ai_answer", title, content)
+            if existing is not None:
+                try:
+                    old_meta = json.loads(existing.metadata or "{}")
+                    if not isinstance(old_meta, dict):
+                        old_meta = {}
+                except Exception:  # noqa: BLE001
+                    old_meta = {}
+                old_meta["expires_at"] = expires_at
+                engine.update(existing.id, metadata=old_meta)
+                return
+        engine.create(
             category="ai_answer",
             title=title,
             content=content,
             tags="auto,ai_answer",
             priority=5,
             source="ai",
-            metadata={"origin": "ai_fallback"},
+            metadata=metadata,
             confidence_score=0.7,
             status="active",
         )
@@ -7315,7 +7570,8 @@ async def _automatic_browse_answer(
     দ্বিতীয় ধাপ — কোনো আলাদা /search কমান্ডের দরকার নেই। খোঁজার ক্রম সবসময়:
     💾 Database → 🌐 Browser Search → 🔵 Groq API। এই ফাংশন শুধু Browser ধাপটা করে:
 
-      - `browse_web_search()`: DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) → Wikipedia (en)।
+      - `browse_web_search()`: Tavily Real Web Search (Key থাকলে, Phase 48) →
+        DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) → Wikipedia (en)।
       - No API Call Mode বন্ধ থাকলে: AI-কে ছোট্ট একটা কল করে কাঁচা তথ্যটা ইউজারের ভাষায়
         সাজিয়ে-গুছিয়ে নেওয়া হয় (তখন ব্যাজ 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
       - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
@@ -7636,7 +7892,7 @@ def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
         # ফ্রি Browse Search (DuckDuckGo → Wikipedia) অবশ্যই চেষ্টা হয়েছিল কিন্তু কিছুই মেলেনি।
         browse_note = (
             "\n🔎 এর মাঝে ফ্রি Browse Search-ও চেষ্টা করা হয়েছিল "
-            "(DuckDuckGo Instant Answer → Wikipedia বাংলা → Wikipedia English) কিন্তু কোথাও "
+            "(Tavily → DuckDuckGo Instant Answer → Wikipedia বাংলা → Wikipedia English) কিন্তু কোথাও "
             "এই প্রশ্নের উত্তর পাওয়া যায়নি।\n"
         )
     return (
@@ -7754,9 +8010,15 @@ def _brain_get_live_context(user_id: int) -> str:
 
 
 async def _phase17_decide(user_id: int, user_text: str) -> Dict[str, Any]:
-    """Run Decision Engine safely. Any Brain OS failure returns a normal AI route."""
+    """Run Decision Engine safely. Any Brain OS failure returns a normal AI route.
+
+    Phase 48: time-sensitive প্রশ্নে ("বর্তমান প্রধানমন্ত্রী কে", "দাম কত", "স্কোর" ইত্যাদি)
+    Step 1 (Database cache) স্কিপ হয় — Decision Engine direct বললেও strategy "ai" করে
+    দেওয়া হয়, যাতে পুরনো cached উত্তর না গিয়ে ফ্লো Step 2 (Browse Search — এখন সবার
+    আগে Tavily Real Web Search)-এ যায় এবং তাজা তথ্য আনা যায়।
+    """
     try:
-        return await decision_engine_service.execute_async(
+        decision = await decision_engine_service.execute_async(
             user_text, user_id=user_id, session_key=str(user_id)
         )
     except Exception as e:
@@ -7769,6 +8031,14 @@ async def _phase17_decide(user_id: int, user_text: str) -> Dict[str, Any]:
             "fallback": "ai",
             "phase17_error": True,
         }
+    if decision.get("strategy") == "direct" and _is_time_sensitive_query(user_text):
+        # সময়-সংবেদনশীল প্রশ্ন — cached (সম্ভবত পুরোনো) উত্তর বিশ্বাস করা যায় না।
+        brain_os_metrics["time_sensitive_skips"] += 1
+        decision = dict(decision)
+        decision["strategy"] = "ai"
+        decision["time_sensitive"] = True
+        logger.info(f"[Phase 48] time-sensitive প্রশ্ন — Step 1 (Database) স্কিপ | query: {user_text!r}")
+    return decision
 
 
 def build_brain_status_text() -> str:
@@ -8416,8 +8686,9 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
         no_api_mode = is_no_api_mode(user_id)
 
         # Step 2: 🌐 Browser Search — ডাটাবেজে না পেলে স্বয়ংক্রিয় (automatic, কোনো আলাদা
-        # কমান্ড ছাড়াই) DuckDuckGo/Wikipedia-তে খোঁজা হয়; পেলে সেটাই (দরকার হলে AI দিয়ে
-        # গুছিয়ে, ব্যাজসহ) ফেরত যায় এবং নিজের Knowledge Engine-এ সেভ হয়।
+        # কমান্ড ছাড়াই) আগে Tavily Real Web Search (Key থাকলে), তারপর
+        # DuckDuckGo/Wikipedia-তে খোঁজা হয়; পেলে সেটাই (দরকার হলে AI দিয়ে গুছিয়ে,
+        # ব্যাজসহ) ফেরত যায় এবং নিজের Knowledge Engine-এ সেভ হয়।
         browse_answer = await _automatic_browse_answer(user_id, user_text, lang_name, no_api_mode)
         if browse_answer:
             brain_os_metrics["browse_answers"] += 1
