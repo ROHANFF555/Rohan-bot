@@ -228,6 +228,20 @@ Phase 45 আপডেটে যা যা নতুন যোগ হয়েছ
   করা থাকে। এই পুরো ফিচারটা backward-compatible ভাবে যোগ হয়েছে (ask_ai/ask_ai_with_history-এ
   নতুন ঐচ্ছিক user_id প্যারামিটার, ডিফল্ট None) — আগের কোনো Command/Feature/UI/MCP
   সার্ভার-টুল বদলায়নি বা ভাঙেনি।
+
+Phase 47 আপডেটে যা যা নতুন যোগ হয়েছে (Source Attribution + /search):
+  প্রতিটা তথ্যবহ উত্তরের নিচে এখন একটা ছোট্ট **উৎস-ব্যাজ** বসে — ইউজার এক নজরেই দেখতে পান
+  তথ্যটা কোথা থেকে এসেছে: 🔵 Groq API (LLM-এর লেখা) · 🌐 Browser Search (লাইভ ওয়েব) ·
+  💾 Database (নিজের Brain OS / Response Cache) · 🔄 Hybrid (একাধিক উৎস মিলিয়ে)। সাথে থাকে
+  সময়, মূল সোর্সের লিংক, কোন কোন সোর্স চেক করা হয়েছিল এবং নির্ভুলতার স্তর
+  (🟢 উচ্চ ৮৫–১০০% / 🟡 মাঝারি ৬০–৮৫% / 🔴 নিম্ন < ৬০%)।
+  নতুন কমান্ড: /search প্রশ্ন — প্রথমে 🌐 ওয়েব সার্চ, না পেলে 💾 নিজের ডাটাবেজ, তাও না পেলে
+  🔵 AI; প্রতিটা ধাপের উৎস ব্যাজে স্পষ্টভাবে দেখানো হয় (বিস্তারিত: docs/SOURCE_ATTRIBUTION.md)।
+  ব্যাজের আসল লজিক rohan_bot/utils/source_tracker.py + rohan_bot/config.py-তে (Telegram/AI/DB
+  থেকে সম্পূর্ণ স্বাধীন, তাই আলাদাভাবে দ্রুত unit-test করা যায়)। নিরাপত্তা: প্যাকেজটা কোনো
+  কারণে import না হলে বা ফিচার বন্ধ করা থাকলে বট ভাঙে না — শুধু ব্যাজ থাকে না, আর Browse
+  Search-এর উত্তরে তখন আগের মতোই সাধারণ উৎস-ফুটার দেখানো হয়। কোনোটাই breaking change নয়।
+  /brainstatus-এ এখন /search ও Source Attribution-এর অবস্থাও দেখা যায়।
 =========================================================================
 """
 
@@ -6792,6 +6806,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 লেখার কাজ\n"
         "/translate ভাষা লেখা — অনুবাদ (উদাহরণ: /translate english আমি ভালো আছি)\n"
         "/grammar লেখা — গ্রামার ঠিক করা\n"
+        "/search প্রশ্ন — ওয়েব সার্চ (উত্তরের নিচে তথ্যের উৎস দেখানো হয়)\n"
         "/rewrite লেখা — লেখা নতুনভাবে লেখা\n"
         "/tone formal/casual লেখা — টোন বদলানো\n"
         "/summarize — কোনো মেসেজে রিপ্লাই দিয়ে লিখুন, সামারি করে দেবে\n"
@@ -6832,6 +6847,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/removeapikey provider — নিজস্ব Key মুছে ফেলুন\n\n"
         "🎁 রেফারেল\n"
         "/myreferrals — আপনার নিজের রেফার লিংক ও বোনাসের হিসাব দেখুন\n\n"
+        "🏷️ উৎস চিহ্ন (Source badge)\n"
+        "প্রতিটা তথ্যবহ উত্তরের নিচে দেখানো হয় তথ্যটা কোথা থেকে এসেছে:\n"
+        "🔵 Groq API (AI-এর লেখা) · 🌐 Browser Search (লাইভ ওয়েব) · 💾 Database (নিজের নলেজ বেস) · 🔄 Hybrid (মিশ্র)\n\n"
         f"প্রতিদিন ফ্রি সীমা: {FREE_DAILY_LIMIT} বার, প্রিমিয়াম সীমা: {PREMIUM_DAILY_LIMIT} বার (AI ফিচারের জন্য)\n"
         "━━━━━━━━━━━━━━━\n"
         f"✨ Developed by {CREATOR_COMPANY}"
@@ -7076,6 +7094,7 @@ brain_os_metrics = {
     "direct_failures": 0,
     "no_api_stuck": 0,   # Phase 43: No-API-Call Mode (per-user) চালু থাকা অবস্থায় মোট যতবার Brain OS নিজে থেকে উত্তর দিতে পারেনি (সব ইউজার মিলিয়ে)
     "browse_answers": 0,  # Phase 44: Brain OS ডাটাবেজে না পেয়ে ফ্রি Browse Search (DuckDuckGo/Wikipedia) দিয়ে যতবার উত্তর দিয়েছে
+    "search_answers": 0,  # Phase 47: /search কমান্ড দিয়ে সোর্স-ব্যাজসহ যতবার উত্তর দেওয়া হয়েছে
 }
 
 
@@ -7286,75 +7305,453 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         logger.debug(f"Phase 44 AI উত্তর Knowledge Engine-এ সেভ করা যায়নি: {e}")
 
 
+async def _browse_and_organize(
+    user_id: int, query: str, lang_hint: str, no_api_mode: bool, organize: bool = True
+) -> Tuple[str, Any, Optional[Dict[str, Any]]]:
+    """Phase 47: ওয়েব সার্চ + (দরকার হলে) AI দিয়ে গুছিয়ে লেখা + source metadata তৈরি।
+
+    `_phase44_browse_and_answer` (সাধারণ চ্যাট) আর `run_browser_search` (/search) — দুজনেই
+    একই লজিক ব্যবহার করে, যাতে দুই জায়গায় উৎস-তথ্য একই রকম থাকে।
+
+    Returns:
+        tuple[str, SourceMetadata | None, dict | None]:
+            (চূড়ান্ত টেক্সট, উৎস-তথ্য, কাঁচা browse ফলাফল)। ওয়েবে কিছু না পেলে
+            ``("", None, None)`` — কলার তখন নিজের পরের fallback ব্যবহার করবে।
+    """
+    query = (query or "").strip()
+    if not query:
+        return "", None, None
+
+    found = await browse_web_search(query, lang_hint=lang_hint)
+    raw_text = ((found or {}).get("text") or "").strip()
+    if not found or not raw_text:
+        return "", None, None
+
+    organized_by_ai = False
+    final_text = raw_text
+
+    if organize and not no_api_mode:
+        # No API Call Mode বন্ধ থাকলে AI-কে ছোট্ট একটা কল করে কাঁচা browse ফলাফলটা ইউজারের
+        # ভাষায় সাজিয়ে-গুছিয়ে লেখা হয় (তখন উত্তরটা 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
+        # চালু থাকলে কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
+        try:
+            organize_prompt = (
+                "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
+                f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_hint} ভাষায় সংক্ষেপে ও "
+                "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
+                "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
+            )
+            organize_input = (
+                f"ইউজারের প্রশ্ন: {query}\n\nওয়েব সার্চের কাঁচা তথ্য "
+                f"({found.get('source', '') or 'ওয়েব সার্চ'}):\n{raw_text}"
+            )
+            ai_result = (
+                await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
+            ).strip()
+            if ai_result:
+                final_text = ai_result
+                organized_by_ai = True
+        except Exception as e:
+            logger.warning("Phase 44/47: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: %s", e)
+
+    metadata = metadata_from_browse_result(found, organized_by_ai=organized_by_ai, query=query)
+    _phase44_save_browsed_knowledge(
+        query, final_text, found.get("source", "") or "ওয়েব সার্চ", found.get("url", "") or ""
+    )
+    return final_text, metadata, found
+
+
 async def _phase44_browse_and_answer(
     user_id: int, user_text: str, lang_name: str, no_api_mode: bool
 ) -> str:
     """Decision Engine নিজের ডাটাবেজে সরাসরি উত্তর দিতে না পারলে (stage == "ai") এখানে প্রথমে
     ফ্রি Browse Search চেষ্টা করা হয়। কিছু পাওয়া গেলে:
-      - No API Call Mode বন্ধ থাকলে: AI-কে ছোট্ট একটা কল করে বলা হয় কাঁচা browse ফলাফলটা
-        ইউজারের ভাষায় সুন্দর করে সাজিয়ে-গুছিয়ে দিতে, এবং সেই গুছানো উত্তরটাই Knowledge
-        Engine-এ সেভ হয়।
-      - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই সহজ ফরম্যাটে (উৎসসহ) কাঁচা তথ্যটাই
-        দেখানো হয় এবং একইভাবে সেভ হয়।
+      - No API Call Mode বন্ধ থাকলে: AI-কে ছোট্ট একটা কল করে কাঁচা তথ্যটা ইউজারের ভাষায়
+        সাজিয়ে-গুছিয়ে নেওয়া হয় এবং সেই গুছানো উত্তরটাই Knowledge Engine-এ সেভ হয়।
+      - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই কাঁচা তথ্যটাই দেখানো হয় (এবং সেভ হয়)।
+    Phase 47: উত্তরের নিচে এখন উৎস-ব্যাজ (🌐 Browser / 🔄 Hybrid) যুক্ত হয় — কোন সোর্স থেকে
+    এসেছে, কোন কোন সোর্স চেক করা হয়েছিল, মূল লিংক ও নির্ভুলতা সবসহ। ব্যাজ বন্ধ থাকলে
+    আগের মতোই সাধারণ উৎস-ফুটার দেখানো হয় (তথ্য হারায় না)।
     কিছুই না পাওয়া গেলে খালি স্ট্রিং রিটার্ন হয় — caller তখন স্বাভাবিক AI fallback ব্যবহার করবে।
     কোনো ধাপেই এই ফাংশন এক্সসেপশন ছুঁড়ে না (ব্যর্থ হলে খালি স্ট্রিং), তাই chat_general-এর
     স্বাভাবিক ফ্লো কখনো এর কারণে ভাঙবে না।"""
     try:
-        found = await browse_web_search(user_text, lang_hint=lang_name)
-        if not found:
+        final_answer, metadata, found = await _browse_and_organize(
+            user_id, user_text, lang_name, no_api_mode
+        )
+        if not final_answer or not found:
             return ""
 
-        raw_text = (found.get("text") or "").strip()
-        source = found.get("source", "") or "ওয়েব সার্চ"
-        url = found.get("url", "") or ""
-        tried_sources = found.get("tried_sources") or []
-        if not raw_text:
-            return ""
-
-        # কোন কোন ব্রাউজার/সোর্স চেক করা হয়েছিল তার তালিকা — প্রমাণ হিসেবে সবসময় দেখানো হয়,
-        # যাতে ইউজার নিজেই বুঝতে পারে সত্যিই ব্রাউজ কল হয়েছে কিনা এবং কোথা থেকে উত্তর মিলেছে।
-        checked_line = ""
-        if tried_sources:
-            checked_line = "\n🔎 চেক করা হয়েছে: " + " → ".join(tried_sources)
-
-        if no_api_mode:
-            final_answer = raw_text
-            final_answer += f"\n\n📚 উৎস: {source}"
-            if url:
-                final_answer += f"\n🔗 {url}"
-            final_answer += checked_line
-            _phase44_save_browsed_knowledge(user_text, raw_text, source, url)
-            return final_answer
-
-        organized = raw_text
-        try:
-            organize_prompt = (
-                "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
-                f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_name} ভাষায় সংক্ষেপে ও "
-                "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
-                "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
+        badged = attach_source_badge(final_answer, metadata, "chat", attribution_lang(user_id))
+        if badged == final_answer:
+            # Attribution বন্ধ/অনুপলব্ধ — Phase 44-এর পুরোনো উৎস-ফুটারই দেখানো হচ্ছে।
+            badged = final_answer + legacy_browse_footer(
+                found.get("source", "") or "ওয়েব সার্চ",
+                found.get("url", "") or "",
+                found.get("tried_sources") or [],
             )
-            organize_input = (
-                f"ইউজারের প্রশ্ন: {user_text}\n\nওয়েব সার্চের কাঁচা তথ্য ({source}):\n{raw_text}"
-            )
-            ai_result = await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
-            organized = (ai_result or "").strip() or raw_text
-        except Exception as e:
-            logger.warning(f"Phase 44: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: {e}")
-            organized = raw_text
-
-        final_answer = organized
-        if url:
-            final_answer += f"\n\n🔗 উৎস: {url}"
-        else:
-            final_answer += f"\n\n📚 উৎস: {source}"
-        final_answer += checked_line
-
-        _phase44_save_browsed_knowledge(user_text, organized, source, url)
-        return final_answer
+        return badged
     except Exception as e:
-        logger.warning(f"Phase 44 Browse Search সম্পূর্ণ ব্যর্থ, স্বাভাবিক AI fallback ব্যবহার হবে: {e}")
+        logger.warning("Phase 44 Browse Search সম্পূর্ণ ব্যর্থ, স্বাভাবিক AI fallback ব্যবহার হবে: %s", e)
         return ""
+
+
+# ============================= Phase 47: Source Attribution (উৎস নির্দেশনা) =============================
+# উদ্দেশ্য: ইউজার যেন প্রতিটা তথ্যবহ উত্তরের নিচে স্পষ্ট দেখতে পায় তথ্যটা **কোথা থেকে** এসেছে —
+#   🔵 Groq API      → LLM (Groq/OpenRouter/Cerebras) দিয়ে তৈরি লেখা
+#   🌐 Browser Search → লাইভ ওয়েব সার্চ (Phase 44-এর DuckDuckGo Instant Answer / Wikipedia)
+#   💾 Database      → বটের নিজের Brain OS (Knowledge/Pattern/Template Engine) বা Response Cache
+#   🔄 Hybrid        → একাধিক সোর্স মিলিয়ে (যেমন Browser-এর কাঁচা তথ্য Groq দিয়ে গুছিয়ে লেখা)
+#
+# আসল লজিক (badge তৈরি, confidence level, ফরম্যাট, per-command সেটিংস) আছে
+# `rohan_bot/utils/source_tracker.py` + `rohan_bot/config.py`-তে — ওগুলো Telegram/AI/DB থেকে
+# সম্পূর্ণ স্বাধীন, তাই আলাদাভাবে দ্রুত unit-test করা যায় (tests/test_source_attribution.py)।
+# main.py এখান থেকে শুধু দুটো হেল্পার ব্যবহার করে: make_source_metadata() ও attach_source_badge()।
+#
+# গুরুত্বপূর্ণ (নিরাপত্তা): rohan_bot/ প্যাকেজটা কোনো কারণে import না হলে (যেমন শুধু main.py
+# কপি করে চালানো হলে) বট ভাঙবে না — SOURCE_ATTRIBUTION_AVAILABLE False হয়ে যাবে, তখন ব্যাজ
+# ছাড়াই আগের মতো উত্তর যাবে। তাই পুরোনো কোনো কমান্ডের আচরণ কখনো ভাঙে না।
+#
+# Environment override (Render/Replit Secrets — সবগুলো ঐচ্ছিক):
+#   SOURCE_ATTRIBUTION_ENABLED=false          → পুরো ফিচার বন্ধ
+#   SOURCE_ATTRIBUTION_FORMAT=full            → ডিফল্ট ব্যাজ ফরম্যাট (minimal/compact/full/detailed)
+#   SOURCE_ATTRIBUTION_LANG=en                → ব্যাজের ভাষা (ডিফল্ট bn)
+#   SOURCE_ATTRIBUTION_DISABLED_COMMANDS=joke,quote   → নির্দিষ্ট কমান্ডের ব্যাজ বন্ধ
+#   SOURCE_ATTRIBUTION_ENABLED_COMMANDS=ocr           → নির্দিষ্ট কমান্ডের ব্যাজ চালু
+
+SOURCE_ATTRIBUTION_MIN_OVERHEAD_MS = 10  # ডিজাইন লক্ষ্য: ব্যাজ যোগ করতে এর বেশি সময় লাগা যাবে না
+
+
+def _load_source_tracker():
+    """`rohan_bot.utils.source_tracker` মডিউলটা খুঁজে বের করে import করে; না পারলে None।
+
+    main.py repo-root-এ থাকে, তাই সাধারণত `import rohan_bot...` সরাসরিই কাজ করে। কিন্তু
+    টেস্ট/ডিপ্লয়মেন্টে main.py আলাদা ডিরেক্টরিতে কপি হতে পারে — তখন main.py-এর নিজের
+    অবস্থান (বা তার প্যারেন্ট, অথবা cwd) থেকে প্যাকেজটা খোঁজা হয়। কোথাও না পেলে None
+    ফেরত যায় এবং source attribution নিজে থেকে বন্ধ থাকে (বট চলতে কোনো সমস্যা হয় না)।
+    """
+    import importlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    for root in (here, os.path.dirname(here), os.getcwd()):
+        if not root:
+            continue
+        if os.path.isdir(os.path.join(root, "rohan_bot", "utils")):
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            break
+    try:
+        return importlib.import_module("rohan_bot.utils.source_tracker")
+    except Exception as exc:  # pragma: no cover - প্যাকেজ না থাকলে বট যাতে না ভাঙে
+        logger.warning(
+            "Phase 47: rohan_bot.utils.source_tracker import করা যায়নি (%s) — "
+            "source attribution বন্ধ থাকবে, বাকি সব ফিচার আগের মতোই চলবে।",
+            exc,
+        )
+        return None
+
+
+_source_tracker = _load_source_tracker()
+
+#: প্যাকেজ পাওয়া গেছে কিনা — False হলে নিচের সব হেল্পার নিষ্ক্রিয় (no-op) হয়ে যায়।
+SOURCE_ATTRIBUTION_AVAILABLE = _source_tracker is not None
+
+
+def source_attribution_settings() -> Dict[str, Any]:
+    """কার্যকর attribution কনফিগ (env override সহ) ফেরত দেয়; প্যাকেজ না থাকলে বন্ধ-কনফিগ।"""
+    if _source_tracker is None:
+        return {"enabled": False, "format": "compact", "lang": "bn", "commands": {}, "confidence": {}}
+    try:
+        return _source_tracker.load_settings()
+    except Exception:  # pragma: no cover - প্রতিরক্ষামূলক
+        return {"enabled": False, "format": "compact", "lang": "bn", "commands": {}, "confidence": {}}
+
+
+def source_attribution_enabled(command: str = "") -> bool:
+    """পুরো ফিচার এবং নির্দিষ্ট কমান্ডের জন্য ব্যাজ চালু আছে কিনা।"""
+    if not SOURCE_ATTRIBUTION_AVAILABLE:
+        return False
+    settings = source_attribution_settings()
+    if not settings.get("enabled", True):
+        return False
+    try:
+        return bool(_source_tracker.resolve_command_settings(command, settings).get("enabled", True))
+    except Exception:  # pragma: no cover - প্রতিরক্ষামূলক
+        return False
+
+
+def make_source_metadata(
+    source: str,
+    *,
+    confidence: Optional[float] = None,
+    urls: Optional[Sequence[str]] = None,
+    secondary: Optional[Sequence[str]] = None,
+    cache_hit: bool = False,
+    note: str = "",
+    breakdown: Optional[Dict[str, float]] = None,
+    timestamp: Optional[datetime] = None,
+    checked_sources: Optional[Sequence[str]] = None,
+    query: str = "",
+):
+    """একটা উত্তরের জন্য source metadata বানায় (প্যাকেজ না থাকলে/ভুল ইনপুটে None)।
+
+    Args:
+        source: ``"groq"`` | ``"browser"`` | ``"database"`` | ``"hybrid"`` (ইমোজি/পূর্ণ নামও চলে)।
+        confidence: 0.0–1.0; না দিলে সোর্সভেদে ডিফল্ট।
+        urls: মূল সোর্সের লিংক।
+        secondary: অতিরিক্ত উৎসের তালিকা — থাকলে উত্তর 🔄 Hybrid হিসেবে দেখানো হয়।
+        cache_hit: ক্যাশ/ডাটাবেজ থেকে সরাসরি এসেছে কিনা।
+        note: ছোট ব্যাখ্যা (যেমন "Response Cache")।
+        breakdown: detailed ব্যাজের শতাংশ ভাগ।
+        timestamp: উৎসের নিজস্ব সময় (DB রেকর্ডের last-updated ইত্যাদি)।
+        checked_sources: কোন কোন সোর্স চেষ্টা করা হয়েছিল।
+        query: ইউজারের মূল প্রশ্ন।
+
+    Returns:
+        SourceMetadata | None: ব্যাজ বানানো সম্ভব না হলে None (তখন উত্তর অপরিবর্তিত থাকে)।
+    """
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.build_metadata(
+            source,
+            confidence_score=confidence,
+            urls=urls,
+            secondary_sources=secondary,
+            cache_hit=cache_hit,
+            note=note,
+            breakdown=breakdown,
+            timestamp=timestamp,
+            checked_sources=checked_sources,
+            query=query,
+        )
+    except Exception as exc:
+        logger.debug("Phase 47: source metadata বানানো যায়নি (%s): %s", source, exc)
+        return None
+
+
+def metadata_from_browse_result(found: Optional[Dict[str, Any]], *, organized_by_ai: bool = False, query: str = ""):
+    """`browse_web_search()`-এর ফলাফল থেকে metadata বানায় (URL + চেক-করা সোর্সসহ)।"""
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.metadata_from_browse_result(
+            found, organized_by_ai=organized_by_ai, query=query
+        )
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: browse metadata বানানো যায়নি: %s", exc)
+        return None
+
+
+def metadata_from_decision(decision: Optional[Dict[str, Any]], *, query: str = ""):
+    """Brain OS-এর direct উত্তরের জন্য 💾 Database metadata বানায়।"""
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.metadata_from_decision(decision, query=query)
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: decision metadata বানানো যায়নি: %s", exc)
+        return None
+
+
+def attribution_lang(user_id: int) -> str:
+    """ব্যাজের ভাষা — ইউজার বাংলা (বা Auto) বেছে নিলে ``"bn"``, নইলে ``"en"``।
+
+    বটের বাকি UI-এর মতোই /setlang-এর পছন্দ মানে; তবে badge-এর স্ট্যাটিক লেবেল শুধু
+    বাংলা/ইংরেজিতেই আছে (অন্য ভাষার জন্য ইংরেজি লেবেল ব্যবহার হয়)।
+    """
+    try:
+        lang, manual = get_effective_language(user_id)
+    except Exception:  # pragma: no cover - DB সমস্যায় ব্যাজ যেন বট না ভাঙায়
+        return "bn"
+    if not manual:
+        return "bn"
+    return "bn" if str(lang or "bn").lower().startswith("bn") else "en"
+
+
+def attach_source_badge(text: str, metadata, command: str, lang_code: str = "bn") -> str:
+    """উত্তরের সাথে উৎস-ব্যাজ যুক্ত করে; কোনো কারণে সম্ভব না হলে মূল লেখাই ফেরত দেয়।
+
+    এই ফাংশন কখনো exception তোলে না — source tracking-এর কারণে চ্যাট-ফ্লো ভাঙা যাবে না।
+    """
+    body = text or ""
+    if metadata is None or _source_tracker is None:
+        return body
+    if not source_attribution_enabled(command):
+        return body
+    try:
+        return _source_tracker.format_with_source(
+            body, metadata, lang=lang_code or "bn", command=command
+        )
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: ব্যাজ যুক্ত করা যায়নি (%s): %s", command, exc)
+        return body
+
+
+def legacy_browse_footer(source: str, url: str, tried_sources: Optional[Sequence[str]] = None) -> str:
+    """Phase 44-এর পুরোনো উৎস-ফুটার — শুধু তখন ব্যবহার হয় যখন attribution ব্যাজ বন্ধ থাকে।
+
+    এতে ফিচার বন্ধ থাকলেও ইউজার আগের মতোই সোর্স-লিংক ও "চেক করা হয়েছে" তালিকা দেখতে পান
+    (অর্থাৎ attribution বন্ধ করা মানে তথ্য হারানো নয়)।
+    """
+    footer = ""
+    if url:
+        footer += f"\n\n🔗 উৎস: {url}"
+    elif source:
+        footer += f"\n\n📚 উৎস: {source}"
+    if tried_sources:
+        footer += "\n🔎 চেক করা হয়েছে: " + " → ".join(tried_sources)
+    return footer
+
+
+def _cache_hit_marker(system_prompt: str, user_text: str) -> bool:
+    """Response Cache-এ এই (prompt, text) জোড়া আগে থেকে আছে কিনা — শুধু পড়ে, কিছু বদলায় না।
+
+    `ask_ai(..., use_cache=True)` কল করার **আগে** ডাকতে হয়; তাহলে উত্তরটা আসল AI কল থেকে
+    এসেছে নাকি 💾 Database/Cache থেকে, সেটা source badge-এ ঠিকভাবে দেখানো যায়।
+    """
+    try:
+        return ai_response_cache._store.get(ai_response_cache.make_key(system_prompt, user_text)) is not None
+    except Exception:  # ক্যাশের অভ্যন্তরীণ গঠন বদলালেও ব্যাজ যেন বট না ভাঙায়
+        return False
+
+
+def _ai_source_metadata(system_prompt: str, user_text: str, *, confidence: float = 0.90, note: str = ""):
+    """`ask_ai(..., use_cache=True)` কলার জন্য metadata — cache hit হলে 💾, নইলে 🔵।"""
+    if _cache_hit_marker(system_prompt, user_text):
+        return make_source_metadata(
+            "database", confidence=max(0.60, confidence), cache_hit=True,
+            note=note or "Response Cache", query=user_text,
+        )
+    return make_source_metadata("groq", confidence=confidence, note=note, query=user_text)
+
+
+async def run_browser_search(
+    user_id: int, query: str, lang_hint: str = "", *, command: str = "search", organize: bool = True
+) -> Tuple[str, Any]:
+    """Phase 47: /search-এর মূল কাজ — সোর্স-ট্র্যাকিংসহ উত্তর খোঁজা।
+
+    খোঁজার ক্রম (প্রথম যেখানে আসল তথ্য মেলে সেটাই ফেরত যায়):
+      1. 🌐 Browser Search — `browse_web_search()` (DuckDuckGo → Wikipedia[ভাষা] → Wikipedia[en])
+      2. 💾 Database — Brain OS Decision Engine-এর direct উত্তর
+      3. 🔵 Groq API — সাধারণ AI কল (No API Call Mode চালু থাকলে এই ধাপ বাদ)
+
+    Args:
+        user_id: যে ইউজার সার্চ করছেন।
+        query: সার্চ কুয়েরি (খালি হলে সাথেই ``("", None)`` ফেরত যায়)।
+        lang_hint: ভাষার ইঙ্গিত — Wikipedia-র ভাষা বেছে নিতে ব্যবহার হয়।
+        command: source attribution-এর per-command সেটিংসের জন্য কমান্ডের নাম।
+        organize: True হলে Browser-এর কাঁচা তথ্য AI দিয়ে গুছিয়ে লেখা হয় (তখন 🔄 Hybrid)।
+
+    Returns:
+        tuple[str, SourceMetadata | None]: (উত্তরের টেক্সট, উৎস-তথ্য)। কিছু না পেলে
+        ``("", None)`` — কলার তখন নিজের মতো "পাওয়া যায়নি" মেসেজ দেখাবে।
+    """
+    query = (query or "").strip()
+    if not query:
+        return "", None
+
+    no_api_mode = is_no_api_mode(user_id)
+
+    # --- 1) 🌐 Browser Search -------------------------------------------------
+    final_text, metadata, found = await _browse_and_organize(
+        user_id, query, lang_hint, no_api_mode, organize=organize
+    )
+    if final_text and found:
+        return final_text, metadata
+
+    # --- 2) 💾 Database (Brain OS Decision Engine) -----------------------------
+    try:
+        decision = await _phase17_decide(user_id, query)
+        if decision.get("strategy") == "direct":
+            direct_answer = _brain_payload_to_answer(decision.get("payload"))
+            if direct_answer.strip():
+                return direct_answer, metadata_from_decision(decision, query=query)
+    except Exception as exc:
+        logger.debug("Phase 47: Database fallback চলাকালীন সমস্যা (উপেক্ষা করা হলো): %s", exc)
+
+    # --- 3) 🔵 Groq API ------------------------------------------------------
+    if no_api_mode:
+        return "", None
+    try:
+        answer = (await ask_ai(
+            "তুমি একজন সহায়ক AI সহকারী। ইউজারের প্রশ্নের সংক্ষিপ্ত, তথ্যবহ ও নির্ভুল উত্তর দাও। "
+            "নিশ্চিত না হলে সেটা স্পষ্টভাবে বলে দাও, অনুমান বানিয়ো না।",
+            query,
+            use_cache=False,
+            user_id=user_id,
+        )).strip()
+    except Exception as exc:
+        logger.warning("Phase 47: সার্চ-এর AI fallback ব্যর্থ: %s", exc)
+        return "", None
+    if not answer:
+        return "", None
+    _phase44_save_ai_knowledge(query, answer)
+    return answer, make_source_metadata("groq", confidence=0.85, query=query, note="AI উত্তর")
+
+
+def build_search_result_text(answer: str) -> str:
+    """/search-এর উত্তরের উপরে ছোট্ট একটা হেডার যোগ করে (ব্যাজ নিচে আলাদাভাবে বসে)।"""
+    return f"🔎 সার্চ ফলাফল\n\n{answer.strip()}"
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Phase 47: ``/search প্রশ্ন`` — সোর্স-ব্যাজসহ ফ্রি ওয়েব সার্চ।
+
+    উত্তরের নিচে সবসময় দেখানো হয় তথ্যটা কোথা থেকে এসেছে (🌐 Browser / 💾 Database /
+    🔵 Groq API / 🔄 Hybrid), কোন কোন সোর্স চেক করা হয়েছিল, মূল লিংক এবং কতটা নির্ভরযোগ্য।
+    """
+    user_id = update.effective_user.id
+    if not await quota_guard(update, action="search"):
+        return
+
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            await localize(
+                user_id,
+                "এভাবে লিখুন: /search আপনার প্রশ্ন\n"
+                "উদাহরণ: /search বাংলাদেশের রাজধানী কোনটি?\n\n"
+                "উত্তরের নিচে তথ্যের উৎস (🌐 ওয়েব / 💾 ডাটাবেজ / 🔵 AI) দেখানো হবে।",
+            )
+        )
+        return
+
+    manual_lang, is_manual = get_effective_language(user_id)
+    if is_manual:
+        lang_name = UI_LANG_CHOICES.get(manual_lang, manual_lang)
+    else:
+        lang_name = language_display_name(detect_language(query))
+
+    thinking = await update.message.reply_text(await localize(user_id, "🔎 খোঁজা হচ্ছে..."))
+    try:
+        answer, metadata = await run_browser_search(user_id, query, lang_name, command="search")
+        if not answer:
+            await update.message.reply_text(
+                await localize(
+                    user_id,
+                    "দুঃখিত, এই প্রশ্নের কোনো নির্ভরযোগ্য তথ্য পাওয়া যায়নি।\n"
+                    "🔎 চেষ্টা করা হয়েছে: ওয়েব সার্চ (DuckDuckGo/Wikipedia), নিজের ডাটাবেজ ও AI।\n\n"
+                    "অন্যভাবে লিখে আবার চেষ্টা করুন।",
+                )
+            )
+            return
+
+        brain_os_metrics["search_answers"] = brain_os_metrics.get("search_answers", 0) + 1
+        text = attach_source_badge(
+            build_search_result_text(answer), metadata, "search", attribution_lang(user_id)
+        )
+        await send_long_text(update, text)
+    except Exception as exc:
+        logger.error("Phase 47 /search এরর: %s", exc)
+        await update.message.reply_text(
+            await localize(user_id, "দুঃখিত, সার্চ করতে সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।")
+        )
+    finally:
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
 
 
 def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
@@ -7531,7 +7928,11 @@ def build_brain_status_text() -> str:
         f"AI route হয়েছে: {ai_routes} বার\n"
         f"No API Call Mode-এ আটকে গিয়ে ইউজারের কাছে তথ্য চাওয়া হয়েছে (সব ইউজার মিলিয়ে): "
         f"{int(brain_os_metrics.get('no_api_stuck', 0))} বার\n"
-        f"🌐 Phase 44 Browse Search দিয়ে উত্তর দেওয়া হয়েছে: {int(brain_os_metrics.get('browse_answers', 0))} বার"
+        f"🌐 Phase 44 Browse Search দিয়ে উত্তর দেওয়া হয়েছে: {int(brain_os_metrics.get('browse_answers', 0))} বার\n"
+        f"🔎 Phase 47 /search দিয়ে উত্তর দেওয়া হয়েছে: {int(brain_os_metrics.get('search_answers', 0))} বার\n"
+        f"🏷️ Source Attribution: "
+        + ("✅ চালু (ডিফল্ট ফরম্যাট: " + str(source_attribution_settings().get('format')) + ")"
+           if source_attribution_enabled("chat") else "⛔ বন্ধ")
     ) + (build_phase27_status_text() if "build_phase27_status_text" in globals() else "")
 
 
@@ -8128,10 +8529,14 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         decision = await _phase17_decide(user_id, user_text)
         direct_answer = ""
+        # Phase 47: উত্তরটা শেষমেশ কোন উৎস থেকে এলো, তার হিসাব — নিচের শাখাগুলোতে সেট হয়
+        # এবং সব শেষে একবার উৎস-ব্যাজ যুক্ত করা হয়।
+        source_meta = None
         if decision.get("strategy") == "direct":
             direct_answer = _brain_payload_to_answer(decision.get("payload"))
             if direct_answer:
                 brain_os_metrics["direct_answers"] += 1
+                source_meta = metadata_from_decision(decision, query=user_text)
             else:
                 brain_os_metrics["direct_failures"] += 1
 
@@ -8147,6 +8552,9 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             browse_answer = await _phase44_browse_and_answer(user_id, user_text, lang_name, no_api_mode)
             if browse_answer:
                 brain_os_metrics["browse_answers"] += 1
+                # Phase 47: browse উত্তরের ব্যাজ (_phase44_browse_and_answer-এর ভেতরেই) আগে থেকেই
+                # যুক্ত, তাই এখানে আলাদা করে আর বসানো হয় না — দুইবার ব্যাজ বসে যাবে।
+                source_meta = None
 
         if direct_answer:
             reply = direct_answer
@@ -8167,6 +8575,8 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history = get_recent_history(user_id, limit=history_limit)
             # Phase 45: user_id দেওয়া হচ্ছে — নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে।
             reply = await ask_ai_with_history(system_prompt, history, user_text, user_id=user_id)
+            # Phase 47: Memory-পথে শেয়ার্ড ক্যাশ ব্যবহার হয় না, তাই এটা সবসময়ই তাজা 🔵 AI উত্তর।
+            source_meta = make_source_metadata("groq", confidence=0.90, query=user_text)
             save_message(user_id, "user", user_text)
             save_message(user_id, "assistant", reply)
             # Phase 44: Browse Search-এও কিছু না পেয়ে AI API কল করে যে উত্তর পাওয়া গেল, সেটাও
@@ -8181,11 +8591,17 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if cached_reply is not None:
                 reply = cached_reply
                 brain_os_metrics["direct_answers"] += 1
+                # Phase 47: ক্যাশ-হিট মানে তথ্যটা 💾 নিজের ডাটাবেজ/ক্যাশ থেকে এসেছে, AI কল হয়নি।
+                source_meta = make_source_metadata(
+                    "database", confidence=0.90, cache_hit=True,
+                    note="General Chat Cache", query=user_text,
+                )
             else:
                 brain_os_metrics["ai_routes"] += 1
                 # Phase 45: user_id দেওয়া হচ্ছে — নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে।
                 reply = await ask_ai(system_prompt, user_text, user_id=user_id)
                 await general_chat_cache.set(lang_name, cache_key_text, reply)
+                source_meta = make_source_metadata("groq", confidence=0.90, query=user_text)
                 # Phase 44: এই AI উত্তরও নিজে থেকে Knowledge Engine-এ যুক্ত হয়ে যায়।
                 _phase44_save_ai_knowledge(user_text, reply)
 
@@ -8200,7 +8616,11 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reply and not direct_answer and not no_api_mode and should_show_own_key_hint(user_id):
             reply += build_own_api_key_hint(user_id)
 
-        await update.message.reply_text(reply)
+        # Phase 47: সবার শেষে উৎস-ব্যাজ বসে — উপরে চ্যাট-মেমরিতে যা সেভ হয়েছে তা ব্যাজ ছাড়াই
+        # থাকে (ইতিহাসে অপ্রয়োজনীয় লেখা ঢোকে না), আর ব্যাজ বন্ধ/অনুপলব্ধ থাকলে reply অপরিবর্তিত।
+        reply = attach_source_badge(reply, source_meta, "chat", attribution_lang(user_id))
+
+        await send_long_text(update, reply)
     except Exception as e:
         logger.error(f"চ্যাট/Brain OS এরর: {e}")
         # Phase 43: No API Call Mode চালু থাকলে এই legacy fallback-ও AI কল করবে না —
@@ -8227,7 +8647,16 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 brain_os_metrics["ai_routes"] += 1
                 # Phase 44: legacy fallback পথেও AI উত্তর নিজে থেকে Knowledge Engine-এ সেভ হয়।
                 _phase44_save_ai_knowledge(user_text, reply)
-                await update.message.reply_text(reply)
+                # Phase 47: এই পথের উত্তরও 🔵 Groq API থেকে আসে, তাই ব্যাজ একই রকম।
+                await send_long_text(
+                    update,
+                    attach_source_badge(
+                        reply,
+                        make_source_metadata("groq", confidence=0.85, query=user_text, note="Legacy fallback"),
+                        "chat",
+                        attribution_lang(user_id),
+                    ),
+                )
             except Exception as fallback_error:
                 logger.error(f"Legacy AI fallback-ও ব্যর্থ: {fallback_error}")
                 await update.message.reply_text(await localize(user_id, "দুঃখিত, উত্তর দিতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"))
@@ -8309,17 +8738,27 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     target_lang = context.args[0]
     text = " ".join(context.args[1:])
+    user_id = update.effective_user.id
+    system_prompt = (
+        f"তুমি একজন অনুবাদক। ইউজারের লেখাটা {target_lang} ভাষায় অনুবাদ করো। শুধু অনুবাদটাই লিখবে, অন্য কিছু লিখবে না।"
+    )
+    metadata = None
     try:
+        # Phase 47: কল করার আগেই দেখে নেওয়া হচ্ছে উত্তরটা Response Cache-এ আছে কিনা —
+        # থাকলে ব্যাজে 💾 Database (cache hit), না থাকলে 🔵 Groq API দেখানো হয়।
+        metadata = _ai_source_metadata(system_prompt, text, confidence=0.92, note=f"অনুবাদ → {target_lang}")
         reply = await ask_ai(
-            f"তুমি একজন অনুবাদক। ইউজারের লেখাটা {target_lang} ভাষায় অনুবাদ করো। শুধু অনুবাদটাই লিখবে, অন্য কিছু লিখবে না।",
+            system_prompt,
             text,
             use_cache=True,  # Phase 10: একই ভাষায় একই লেখা আগে অনুবাদ করা থাকলে ক্যাশ থেকে দেওয়া হবে
-            user_id=update.effective_user.id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
+            user_id=user_id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
         )
-        await update.message.reply_text(reply)
+        await send_long_text(update, attach_source_badge(reply, metadata, "translate", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"অনুবাদ এরর: {e}")
-        await update.message.reply_text("দুঃখিত, অনুবাদ করতে সমস্যা হয়েছে।")
+        await update.message.reply_text(
+            await localize(user_id, "দুঃখিত, অনুবাদ করতে সমস্যা হয়েছে।")
+        )
 
 
 async def grammar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8329,17 +8768,21 @@ async def grammar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("এভাবে লিখুন: /grammar আপনার লেখা")
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখার ভুল ঠিক করো (বানান, গ্রামার)। শুধু ঠিক করা লেখাটাই ফেরত দাও, অন্য কিছু বলবে না।"
+    metadata = None
     try:
+        metadata = _ai_source_metadata(system_prompt, text, confidence=0.92, note="গ্রামার চেক")  # Phase 47
         reply = await ask_ai(
-            "তুমি লেখার ভুল ঠিক করো (বানান, গ্রামার)। শুধু ঠিক করা লেখাটাই ফেরত দাও, অন্য কিছু বলবে না।",
+            system_prompt,
             text,
             use_cache=True,  # Phase 10: একই লেখা আগে গ্রামার চেক করা থাকলে ক্যাশ থেকে দেওয়া হবে
-            user_id=update.effective_user.id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
+            user_id=user_id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
         )
-        await update.message.reply_text(reply)
+        await send_long_text(update, attach_source_badge(reply, metadata, "grammar", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"গ্রামার এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def rewrite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8349,15 +8792,19 @@ async def rewrite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("এভাবে লিখুন: /rewrite আপনার লেখা")
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখাটা একই অর্থ রেখে নতুনভাবে সুন্দর করে লেখো।"
+    metadata = None
     try:
+        metadata = _ai_source_metadata(system_prompt, text, confidence=0.90, note="রিরাইট")  # Phase 47
         reply = await ask_ai(
-            "তুমি লেখাটা একই অর্থ রেখে নতুনভাবে সুন্দর করে লেখো।", text,
-            use_cache=True, user_id=update.effective_user.id,
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        await send_long_text(update, attach_source_badge(reply, metadata, "rewrite", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"রিরাইট এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def tone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8368,15 +8815,19 @@ async def tone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tone_type = context.args[0]
     text = " ".join(context.args[1:])
+    user_id = update.effective_user.id
+    system_prompt = f"তুমি লেখাটাকে {tone_type} (আনুষ্ঠানিক/অনানুষ্ঠানিক) স্টাইলে বদলে দাও।"
+    metadata = None
     try:
+        metadata = _ai_source_metadata(system_prompt, text, confidence=0.90, note=f"টোন → {tone_type}")  # Phase 47
         reply = await ask_ai(
-            f"তুমি লেখাটাকে {tone_type} (আনুষ্ঠানিক/অনানুষ্ঠানিক) স্টাইলে বদলে দাও।", text,
-            use_cache=True, user_id=update.effective_user.id,
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        await send_long_text(update, attach_source_badge(reply, metadata, "tone", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"টোন এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8386,17 +8837,26 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and update.message.reply_to_message and update.message.reply_to_message.text:
         text = update.message.reply_to_message.text
     if not text:
-        await update.message.reply_text("কোনো মেসেজে রিপ্লাই দিয়ে /summarize লিখুন, অথবা /summarize এর পর লেখা দিন।")
-        return
-    try:
-        reply = await ask_ai(
-            "তুমি লেখাটার সংক্ষিপ্ত সারমর্ম বাংলায় লিখে দাও।", text,
-            use_cache=True, user_id=update.effective_user.id,
+        await update.message.reply_text(
+            await localize(
+                update.effective_user.id,
+                "কোনো মেসেজে রিপ্লাই দিয়ে /summarize লিখুন, অথবা /summarize এর পর লেখা দিন।",
+            )
         )
-        await update.message.reply_text(reply)
+        return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখাটার সংক্ষিপ্ত সারমর্ম বাংলায় লিখে দাও।"
+    metadata = None
+    try:
+        metadata = _ai_source_metadata(system_prompt, text, confidence=0.90, note="সারসংক্ষেপ")  # Phase 47
+        reply = await ask_ai(
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
+        )
+        await send_long_text(update, attach_source_badge(reply, metadata, "summarize", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"সামারি এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 # ============================= PDF ফিচার =============================
@@ -9159,6 +9619,7 @@ MENU_SECTIONS = {
     "text": (
         "📝 লেখার কাজ",
         "/translate ভাষা লেখা — অনুবাদ (উদাহরণ: /translate english আমি ভালো আছি)\n"
+        "/search প্রশ্ন — ওয়েব সার্চ (উত্তরের নিচে তথ্যের উৎস দেখানো হয়)\n"
         "/grammar লেখা — গ্রামার ঠিক করা\n"
         "/rewrite লেখা — লেখা নতুনভাবে লেখা\n"
         "/tone formal/casual লেখা — টোন বদলানো\n"
@@ -9525,27 +9986,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await quota_guard(update, action="joke"):
         return
+    user_id = update.effective_user.id
+    metadata = None
     try:
         reply = await ask_ai(
             "তুমি একটা মজার, শালীন বাংলা জোক বলো। ছোট রাখবে।", "একটা জোক বলো",
-            user_id=update.effective_user.id,
+            user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        # Phase 47: জোক সবসময় 🔵 AI দিয়ে তৈরি (ক্যাশ ব্যবহার হয় না, তাই প্রতিবার নতুন)।
+        metadata = make_source_metadata("groq", confidence=0.95, query="একটা জোক বলো")
     except Exception:
-        await update.message.reply_text("দুঃখিত, এখন জোক আনতে পারলাম না।")
+        reply = await localize(user_id, "দুঃখিত, এখন জোক আনতে পারলাম না।")
+    await send_long_text(update, attach_source_badge(reply, metadata, "joke", attribution_lang(user_id)))
 
 
 async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await quota_guard(update, action="quote"):
         return
+    user_id = update.effective_user.id
+    metadata = None
     try:
         reply = await ask_ai(
             "তুমি একটা অনুপ্রেরণামূলক ছোট উক্তি বাংলায় লেখো।", "একটা উক্তি দাও",
-            user_id=update.effective_user.id,
+            user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        # Phase 47: উক্তিও 🔵 AI থেকে আসে।
+        metadata = make_source_metadata("groq", confidence=0.95, query="একটা উক্তি দাও")
     except Exception:
-        await update.message.reply_text("দুঃখিত, এখন উক্তি আনতে পারলাম না।")
+        reply = await localize(user_id, "দুঃখিত, এখন উক্তি আনতে পারলাম না।")
+    await send_long_text(update, attach_source_badge(reply, metadata, "quote", attribution_lang(user_id)))
 
 
 async def dice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16472,6 +16941,8 @@ async def run_bot_async():
 
     app.add_handler(CommandHandler("translate", translate_command))
     app.add_handler(CommandHandler("grammar", grammar_command))
+    # Phase 47: /search — সোর্স-ব্যাজসহ ফ্রি ওয়েব সার্চ (🌐 Browser → 💾 Database → 🔵 AI)
+    app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CommandHandler("rewrite", rewrite_command))
     app.add_handler(CommandHandler("tone", tone_command))
     app.add_handler(CommandHandler("summarize", summarize_command))
