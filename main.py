@@ -10671,6 +10671,7 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 CODE_TASK_MAX_TASKS = 12          # একটা প্রজেক্ট প্ল্যানে সর্বোচ্চ কতগুলো ধাপ থাকবে
 CODE_CONTEXT_PREV_TASKS = 3       # একটা ধাপের কোড বানানোর সময় আগের কয়টা সম্পন্ন ধাপের শিরোনাম প্রসঙ্গ হিসেবে পাঠানো হবে
+CODE_CONTEXT_EXISTING_CODE_MAX_CHARS = 8000  # আগের ধাপের assemble করা কোড কতটুকু পর্যন্ত prompt-এ পাঠানো হবে (শেষ অংশ রাখা হয়)
 
 # ---- Knowledge Base: খুবই কমন প্যাটার্ন/বয়লারপ্লেট — মিলে গেলে AI-কে জিজ্ঞেস না করেই
 #      বট নিজে থেকে সরাসরি কোড বসিয়ে দেয় (Task Split-এর সময় সবার আগে এটা চেক হয়) ----
@@ -11547,10 +11548,36 @@ async def autonomous_implement_task(project:dict,task:dict) -> dict:
     try:
         ctx=await asyncio.to_thread(build_smart_context,project.get("user_id"),task["description"]+"\nTarget files: "+task.get("target_files", ""))
         impact_ctx=build_phase28_context(task.get("phase28_impact",{}),6500) if task.get("phase28_impact") else "Phase 28 impact context unavailable; Confidence: LOW"
+        # আগের সম্পন্ন কোনো task একই target_files-এ কাজ করে থাকলে সেই ফাইলের
+        # বিদ্যমান কোড context হিসেবে দাও আর "সম্পূর্ণ আপডেটেড ফাইল ফেরত দাও"
+        # নির্দেশ দাও — নইলে প্রতিটা ধাপ আলাদা fragment/duplicate entry-point
+        # লিখে ফেলে আর assemble-এ ডুপ্লিকেট আউটপুট আসে। Non-fatal (এররে খালি)।
+        existing_file_note=""
+        try:
+            my_target=(task.get("target_files") or "").strip().lower()
+            prior=[t for t in get_project_tasks(project["id"])
+                   if t.get("status")=="done" and t.get("code")
+                   and t.get("id")!=task.get("id")
+                   and (t.get("target_files") or "").strip().lower()==my_target]
+            if prior:
+                prev_code=(max(prior,key=lambda t:t["seq"])["code"] or "").strip()
+                if len(prev_code)>CODE_CONTEXT_EXISTING_CODE_MAX_CHARS:
+                    prev_code=prev_code[-CODE_CONTEXT_EXISTING_CODE_MAX_CHARS:]
+                if prev_code:
+                    existing_file_note=(
+                        "\nEXISTING FILE CONTENT (this task edits/extends the SAME file):\n"
+                        "```\n"+prev_code+"\n```\n"
+                        "IMPORTANT: Return the COMPLETE UPDATED FILE (existing code merged with "
+                        "this task's changes), not just a fragment. Do not duplicate functions "
+                        "or the if __name__ == \"__main__\" block — edit/replace as needed so "
+                        "the result is a single clean, runnable file.")
+        except Exception as _e:
+            logger.debug("Phase 20 existing-file context skipped: %s", _e)
         system=("You are an autonomous coding agent. Implement ONLY the requested task. "
                 "Return code only. Do not claim files were changed; return the code artifact. "
                 "Use the compact context below and preserve existing architecture.\n"
-                "PHASE 28 IMPACT CONTEXT:\n"+impact_ctx+"\nSMART CONTEXT:\n"+_autonomous_context_text(ctx,10000))
+                "PHASE 28 IMPACT CONTEXT:\n"+impact_ctx+"\nSMART CONTEXT:\n"+_autonomous_context_text(ctx,10000)
+                +existing_file_note)
         reply=await ask_ai(system,f"Task: {task['title']}\nDescription: {task['description']}\nTarget files: {task.get('target_files','')}")
         code=_strip_code_fences(reply)
         ok,detail=autonomous_syntax_hook(code,project.get("stack","python"))
@@ -12270,8 +12297,9 @@ def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
 async def process_next_code_task(project: dict):
     """
     Task Split: পরের pending ধাপটা নেয়। Knowledge Base-এ মিলে গেলে AI ছাড়াই কোড বসায়,
-    না মিললে শুধু এই ধাপের জন্য ছোট, নির্দিষ্ট প্রশ্ন AI-কে পাঠানো হয় (পুরো প্রজেক্ট না —
-    শুধু stack ও আগের কয়েকটা সম্পন্ন ধাপের শিরোনাম প্রসঙ্গ হিসেবে)।
+    না মিললে এই ধাপের জন্য নির্দিষ্ট প্রশ্ন AI-কে পাঠানো হয় — সাথে প্রজেক্টের এতদূর
+    assemble করা কোড context হিসেবে যায়, যাতে AI প্রতিবার সম্পূর্ণ আপডেটেড ফাইল দেয়
+    (fragment/duplicate entry-point না)।
     """
     task = get_next_pending_task(project["id"])
     if not task:
@@ -12345,12 +12373,35 @@ async def process_next_code_task(project: dict):
     done_titles = [t["title"] for t in all_tasks if t["status"] == "done"][-CODE_CONTEXT_PREV_TASKS:]
     context_note = ("আগের সম্পন্ন ধাপ: " + "; ".join(done_titles)) if done_titles else "এটাই প্রথম ধাপ।"
 
+    # আগের ধাপগুলোর প্রকৃত কোডও context হিসেবে পাঠানো হয় — নইলে AI প্রতিবার
+    # নতুন করে পুরো স্ক্রিপ্ট কল্পনা করে লেখে আর /exportcode-এ ডুপ্লিকেট main()/
+    # if __name__ ব্লক জমে যায়। কোনো এররে আগের (শুধু-শিরোনাম) আচরণে fallback।
+    existing_code = ""
+    try:
+        existing_code = assemble_project_code(project["id"])
+        if len(existing_code) > CODE_CONTEXT_EXISTING_CODE_MAX_CHARS:
+            existing_code = existing_code[-CODE_CONTEXT_EXISTING_CODE_MAX_CHARS:]
+    except Exception as e:
+        logger.warning("process_next_code_task: existing-code context failed: %s", e)
+        existing_code = ""
+
     system_prompt = (
-        "তুমি একজন অভিজ্ঞ প্রোগ্রামার। নিচে একটা বড় প্রজেক্টের শুধু একটামাত্র ছোট ধাপ দেওয়া হলো — "
-        "শুধু এই ধাপের জন্যই প্রয়োজনীয় কোড লিখে দাও, পুরো প্রজেক্ট না। শুধু কোড দাও "
-        "(দরকার হলে ছোট কমেন্ট থাকতে পারে), বাড়তি ভূমিকা/ব্যাখ্যা লেখার দরকার নেই।\n"
-        f"প্রজেক্ট: {project['name']} | স্ট্যাক/ভাষা: {project['stack']}\n{context_note}"
+        "তুমি একজন অভিজ্ঞ প্রোগ্রামার। এই প্রজেক্টের একটা নির্দিষ্ট ধাপ (ফিচার/অংশ) "
+        "যোগ করতে হবে। শুধু কোড দাও (দরকার হলে ছোট কমেন্ট থাকতে পারে), বাড়তি "
+        "ভূমিকা/ব্যাখ্যা লেখার দরকার নেই।\n"
+        f"প্রজেক্ট: {project['name']} | স্ট্যাক/ভাষা: {project['stack']}\n{context_note}\n"
     )
+    if existing_code.strip():
+        system_prompt += (
+            "\nএখন পর্যন্ত ফাইলটা এরকম দেখতে (আগের ধাপগুলো মিলিয়ে):\n"
+            f"```\n{existing_code}\n```\n"
+            "গুরুত্বপূর্ণ: এই ধাপের জন্য তুমি **সম্পূর্ণ আপডেটেড ফাইল** ফেরত দেবে "
+            "(উপরের কোডের সাথে এই ধাপের পরিবর্তন যোগ করে), শুধু নতুন অংশটুকু না। "
+            "একই ফাংশন/if __name__ ব্লক দুইবার রাখবে না — পুরনোটা প্রয়োজনমতো "
+            "সম্পাদনা/প্রতিস্থাপন করে একটামাত্র পরিষ্কার, চালানোর-যোগ্য ফাইল দেবে।"
+        )
+    else:
+        system_prompt += "\nএটাই এই প্রজেক্টের প্রথম কোড — নতুন ফাইল লেখো।"
     live_context = _brain_get_live_context(project.get("user_id", 0)) if project.get("user_id") else ""
     if live_context:
         context_note += "\nBrain OS context:\n" + live_context
@@ -12366,13 +12417,62 @@ async def process_next_code_task(project: dict):
     return task
 
 
-def assemble_project_code(project_id: int) -> str:
-    """বট নিজে থেকে সব সম্পন্ন ধাপের কোড জোড়া লাগিয়ে (assemble) একটা সম্পূর্ণ ফাইল বানায়।"""
-    parts = []
-    for t in get_project_tasks(project_id):
-        if t["status"] == "done" and t["code"]:
-            parts.append(f"# ---- ধাপ {t['seq']}: {t['title']} ----\n{t['code']}\n")
+def _code_has_main_guard(code: str) -> bool:
+    """Python entry-point ব্লক (if __name__ == "__main__") আছে কি না — de-dup heuristic-এর জন্য।"""
+    return "if __name__" in (code or "") and "__main__" in (code or "")
+
+
+def _assemble_task_group(tasks: list) -> str:
+    """একই ফাইলের (গ্রুপের) ধাপগুলো জোড়া লাগায়; একাধিক ধাপে entry-point ব্লক থাকলে
+    ধরে নেওয়া হয় পরের ধাপগুলো আগেরটার updated ভার্সন — শুধু সর্বশেষ (সর্বোচ্চ seq)
+    ধাপের কোডটাই চূড়ান্ত রানেবল ফাইল হিসেবে নেওয়া হয়।"""
+    guarded = [t for t in tasks if _code_has_main_guard(t["code"])]
+    if len(guarded) >= 2:
+        latest = max(guarded, key=lambda t: t["seq"])
+        return (latest["code"] or "").strip()
+    # অন্যথায় আগের মতো ধাপে ধাপে জোড়া (আলাদা আলাদা helper/অংশ হলে এটাই সঠিক)।
+    parts = [f"# ---- ধাপ {t['seq']}: {t['title']} ----\n{t['code']}\n" for t in tasks]
     return "\n\n".join(parts).strip()
+
+
+def assemble_project_code(project_id: int) -> str:
+    """বট নিজে থেকে সব সম্পন্ন ধাপের কোড জোড়া লাগিয়ে (assemble) একটা সম্পূর্ণ ফাইল বানায়।
+
+    Safety net: একাধিক ধাপে `if __name__ == "__main__":` ব্লক থাকলে সেগুলোকে একই
+    ফাইলের ক্রমাগত ভার্সন ধরে শুধু সর্বশেষটাই রাখা হয় (raw concatenate করলে main()
+    বারবার redefine হয়ে ডুপ্লিকেট আউটপুট আসত)। Multi-file প্রজেক্টে (আলাদা আলাদা
+    target_files) প্রতিটা ফাইল-গ্রুপে আলাদাভাবে একই লজিক প্রয়োগ হয়। কোনো এররে
+    পুরনো concatenate আচরণে fallback (non-fatal)।"""
+    all_tasks = get_project_tasks(project_id)
+    done_tasks = [t for t in all_tasks if t["status"] == "done" and t["code"]]
+    if not done_tasks:
+        return ""
+    try:
+        # Multi-file হলে target_files অনুযায়ী গ্রুপ (seq-অর্ডার অক্ষুণ্ণ রেখে);
+        # target_files খালি থাকলে সবগুলো একটাই (single-file) গ্রুপ।
+        groups: dict = {}
+        group_order = []
+        for t in done_tasks:
+            key = (t.get("target_files") or "").strip().lower()
+            if key not in groups:
+                groups[key] = []
+                group_order.append(key)
+            groups[key].append(t)
+        if len(group_order) <= 1:
+            return _assemble_task_group(done_tasks)
+        sections = []
+        for key in group_order:
+            body = _assemble_task_group(groups[key])
+            if not body:
+                continue
+            label = (groups[key][0].get("target_files") or "").strip()
+            header = f"# ==== ফাইল: {label} ====\n" if label else ""
+            sections.append(f"{header}{body}")
+        return "\n\n\n".join(sections).strip()
+    except Exception as e:
+        logger.warning("assemble_project_code de-dup fallback to concatenate: %s", e)
+        parts = [f"# ---- ধাপ {t['seq']}: {t['title']} ----\n{t['code']}\n" for t in done_tasks]
+        return "\n\n".join(parts).strip()
 
 
 def build_project_status_text(project: dict) -> str:
