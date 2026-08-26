@@ -2142,6 +2142,7 @@ class KnowledgeEngine:
                     "id": row.get("id"),
                     "title": row.get("title", ""),
                     "content": row.get("content", ""),
+                    "category": row.get("category", "") or "",
                     "confidence_score": float(row.get("confidence_score", 0.7) or 0.7),
                     "score": max(0.0, min(1.0, score)),
                 })
@@ -2520,6 +2521,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_WORD_TOKEN_RE = re.compile(r"[\w\u0980-\u09FF]+", flags=re.UNICODE)
+
+
+def _whole_word_in_text(keyword: str, text: str) -> bool:
+    """keyword টেক্সটে whole-word/phrase হিসেবে আছে কিনা — সাধারণ substring নয়।
+
+    বাংলা ভাওয়েল-সাইন/হসন্ত `\\w`-এ পড়ে না, তাই lookaround নয় — টোকেন তুলনা
+    (`[\\w\\u0980-\\u09FF]+`) ব্যবহার করা হয়। ফলে \"কমান্ড\" \"কমান্ডারকে\"-এর ভেতর
+    মেলে না, কিন্তু \"কমান্ড তালিকা\"-তে মেলে; \"help\" \"helpful\"-এ মেলে না।
+    মাল্টি-ওয়ার্ড ফ্রেজ (যেমন \"thank you\") পরপর টোকেন হিসেবে মিলে।
+    কোনো এক্সসেপশনে False — কলার তখন ম্যাচ না ধরে AI/পরের ক্যান্ডিডেটে যায়।
+    """
+    try:
+        kw = (keyword or "").strip()
+        if not kw:
+            return False
+        kw_tokens = [t.casefold() for t in _WORD_TOKEN_RE.findall(kw)]
+        if not kw_tokens:
+            return False
+        text_tokens = [t.casefold() for t in _WORD_TOKEN_RE.findall(text or "")]
+        n = len(kw_tokens)
+        if n > len(text_tokens):
+            return False
+        for i in range(len(text_tokens) - n + 1):
+            if text_tokens[i:i + n] == kw_tokens:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _pattern_compute_hash(pattern_type: str, match_value: str, category: str) -> str:
     """Duplicate Pattern Detection-এর জন্য sha256(pattern_type+match_value+category)।"""
     payload = f"{(pattern_type or '').strip().lower()}|{(match_value or '').strip().lower()}|{(category or '').strip().lower()}"
@@ -2742,7 +2774,9 @@ class PatternEngine:
             keywords = [k.strip().lower() for k in pattern.match_value.split(",") if k.strip()]
             if not keywords:
                 return None
-            matched = sum(1 for k in keywords if k in text_lower)
+            # Whole-word/phrase match only — "কমান্ড" যেন কোনো বড় বাক্যের দূরবর্তী
+            # substring হিসেবে (বা "helpful"-এর ভেতর "help") ভুলভাবে না মেলে।
+            matched = sum(1 for k in keywords if _whole_word_in_text(k, text))
             if matched == 0:
                 return None
             return min(1.0, matched / len(keywords)) * pattern.confidence_score
@@ -2769,12 +2803,15 @@ class PatternEngine:
 
     def match(
         self, text: str, category: Optional[str] = None, top_n: int = 1, log_analytics: bool = True,
+        exclude_categories: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Intelligent Pattern Matching — সব অ্যাক্টিভ প্যাটার্নের বিপরীতে টেক্সট চেক করে,
         Priority-based Selection (প্রথমে priority, তারপর confidence) অনুযায়ী সাজিয়ে সেরা
         `top_n`টা ম্যাচ রিটার্ন করে। রিটার্ন ফরম্যাট:
         [{"pattern": BrainPattern, "confidence": float}, ...]
+        `exclude_categories` দিলে সেই ক্যাটাগরির প্যাটার্ন (যেমন coding-context-এ
+        bot_info/greeting) আগেই বাদ পড়ে।
         """
         text = (text or "").strip()
         if not text:
@@ -2783,6 +2820,20 @@ class PatternEngine:
         candidates = self._load_active_patterns()
         if category:
             candidates = [p for p in candidates if p.category == category]
+        if exclude_categories:
+            try:
+                excluded = {
+                    str(c).strip().lower()
+                    for c in exclude_categories
+                    if str(c).strip()
+                }
+                if excluded:
+                    candidates = [
+                        p for p in candidates
+                        if str(getattr(p, "category", "") or "").strip().lower() not in excluded
+                    ]
+            except Exception:
+                pass
 
         results: List[Dict[str, Any]] = []
         for pattern in candidates:
@@ -4593,6 +4644,118 @@ class DecisionRepository:
         with self._conn() as conn: rows=conn.execute(sql,args).fetchall()
         return [dict(zip(["id","user_id","request_hash","stage","strategy","provider_hint","confidence","score","payload","created_at","updated_at","deleted_at"],r)) for r in rows]
 
+# Coding-orchestrator context-এ greeting/bot-info FAQ কখনোই সঠিক উত্তর নয় —
+# DecisionEngine.execute(..., exclude_categories=CODING_EXCLUDED_BRAIN_CATEGORIES)
+# দিয়ে সেগুলো candidate তালিকা থেকে সম্পূর্ণ বাদ যায়।
+CODING_EXCLUDED_BRAIN_CATEGORIES: List[str] = ["bot_info", "greeting"]
+
+
+def _normalize_exclude_categories(exclude_categories: Optional[Sequence[str]] = None) -> set:
+    try:
+        return {str(c).strip().lower() for c in (exclude_categories or []) if str(c).strip()}
+    except Exception:
+        return set()
+
+
+def _decision_iter_search_items(results: Any) -> List[Any]:
+    """Knowledge/Documentation/Template search রিটার্ন (list বা {items: [...]}) সমানভাবে iterate করে।"""
+    try:
+        if results is None:
+            return []
+        if isinstance(results, dict):
+            items = results.get("items")
+            return list(items) if isinstance(items, list) else []
+        if isinstance(results, (list, tuple)):
+            return list(results)
+        return []
+    except Exception:
+        return []
+
+
+def _payload_category(payload: Any) -> str:
+    """Pattern/Knowledge/Documentation/Template payload থেকে category বের করে (lowercase)।"""
+    try:
+        if payload is None:
+            return ""
+        if isinstance(payload, dict):
+            cat = payload.get("category")
+            if cat:
+                return str(cat).strip().lower()
+            inner = payload.get("pattern")
+            if inner is not None:
+                return _payload_category(inner)
+            for key in ("knowledge", "documentation", "template"):
+                if key in payload:
+                    nested = _payload_category(payload.get(key))
+                    if nested:
+                        return nested
+            return ""
+        return str(getattr(payload, "category", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _category_excluded(payload: Any, excluded: set) -> bool:
+    if not excluded:
+        return False
+    return _payload_category(payload) in excluded
+
+
+def _pattern_match_quality_ok(request: str, payload: Any) -> bool:
+    """Pattern-এর match_value request-এ significant/whole-word অংশ কিনা — শুধু substring নয়।"""
+    try:
+        match_value = ""
+        pattern_type = "keyword"
+        if isinstance(payload, dict):
+            inner = payload.get("pattern")
+            if inner is not None:
+                match_value = (
+                    getattr(inner, "match_value", None)
+                    or (inner.get("match_value") if isinstance(inner, dict) else "")
+                    or ""
+                )
+                pattern_type = (
+                    getattr(inner, "pattern_type", None)
+                    or (inner.get("pattern_type") if isinstance(inner, dict) else "")
+                    or "keyword"
+                )
+            if not match_value:
+                match_value = str(payload.get("match_value") or "")
+                pattern_type = str(payload.get("pattern_type") or pattern_type)
+        else:
+            match_value = str(getattr(payload, "match_value", "") or "")
+            pattern_type = str(getattr(payload, "pattern_type", "keyword") or "keyword")
+        match_value = (match_value or "").strip()
+        if not match_value:
+            return False
+        if pattern_type == "regex":
+            try:
+                return re.search(match_value, request or "", flags=re.IGNORECASE) is not None
+            except re.error:
+                return False
+        keywords = [k.strip() for k in match_value.split(",") if k.strip()]
+        return any(_whole_word_in_text(k, request) for k in keywords)
+    except Exception:
+        return False
+
+
+def _template_match_quality_ok(request: str, payload: Any) -> bool:
+    """Template name/body-র significant token request-এ whole-word হিসেবে থাকতে হবে।"""
+    try:
+        if isinstance(payload, dict):
+            name = str(payload.get("name") or "")
+            body = str(payload.get("body") or "")
+        else:
+            name = str(getattr(payload, "name", "") or "")
+            body = str(getattr(payload, "body", "") or "")
+        tokens = re.findall(r"[\w\u0980-\u09FF]{3,}", f"{name} {body[:120]}", flags=re.UNICODE)
+        if not tokens:
+            return False
+        return any(_whole_word_in_text(t, request) for t in tokens[:12])
+    except Exception:
+        return False
+
+
 class DecisionEngine(EngineInterface):
     name="decision"
     def __init__(self,context_engine:Optional[ContextEngine]=None,repository:Optional[DecisionRepository]=None)->None:
@@ -4603,35 +4766,50 @@ class DecisionEngine(EngineInterface):
     @staticmethod
     def _hash(request:str,context:Dict[str,Any])->str:
         return hashlib.sha256((request+"|"+json.dumps(context,sort_keys=True,ensure_ascii=False)).encode()).hexdigest()
-    def _engine_candidates(self,request:str)->List[Dict[str,Any]]:
+    def _engine_candidates(self,request:str,exclude_categories:Optional[Sequence[str]]=None)->List[Dict[str,Any]]:
         candidates=[]
+        excluded=_normalize_exclude_categories(exclude_categories)
         try:
-            for item in PatternEngine().match(request):
+            for item in PatternEngine().match(request, exclude_categories=list(excluded) or None):
+                if _category_excluded(item, excluded):
+                    continue
                 candidates.append({"stage":"pattern","score":70+float(item.get("confidence",item.get("confidence_score",0))*20),"confidence":float(item.get("confidence",item.get("confidence_score",0.7))),"payload":item})
         except Exception as e: logger.debug("Decision pattern stage skipped: %s",e)
         try:
             results=KnowledgeEngine().search(request,limit=5) if hasattr(KnowledgeEngine(),"search") else []
-            for item in results: candidates.append({"stage":"knowledge","score":60+float(item.get("score",0))*30,"confidence":float(item.get("confidence_score",0.7)),"payload":item})
+            for item in _decision_iter_search_items(results):
+                if _category_excluded(item, excluded):
+                    continue
+                candidates.append({"stage":"knowledge","score":60+float(item.get("score",0))*30,"confidence":float(item.get("confidence_score",0.7)),"payload":item})
         except Exception as e: logger.debug("Decision knowledge stage skipped: %s",e)
         try:
             results=DocumentationEngine().search(request,limit=5) if hasattr(DocumentationEngine(),"search") else []
-            for item in results: candidates.append({"stage":"documentation","score":55+float(item.get("score",0))*30,"confidence":float(item.get("confidence_score",0.6)),"payload":item})
+            for item in _decision_iter_search_items(results):
+                if _category_excluded(item, excluded):
+                    continue
+                candidates.append({"stage":"documentation","score":55+float((item.get("score",0) if isinstance(item,dict) else 0))*30,"confidence":float((item.get("confidence_score",0.6) if isinstance(item,dict) else 0.6)),"payload":item})
         except Exception as e: logger.debug("Decision documentation stage skipped: %s",e)
         try:
             results=TemplateEngine().search(request,limit=3) if hasattr(TemplateEngine(),"search") else []
-            for item in results: candidates.append({"stage":"template","score":50+float(item.get("priority",5))*4,"confidence":0.65,"payload":item})
+            for item in _decision_iter_search_items(results):
+                if _category_excluded(item, excluded):
+                    continue
+                priority = item.get("priority", 5) if isinstance(item, dict) else getattr(item, "priority", 5)
+                candidates.append({"stage":"template","score":50+float(priority or 5)*4,"confidence":0.65,"payload":item})
         except Exception as e: logger.debug("Decision template stage skipped: %s",e)
         candidates.append({"stage":"ai","score":45,"confidence":0.55,"payload":{}})
         return candidates
 
-    def execute(self,request:str,user_id:Optional[int]=None,session_key:str="",provider_hint:str="")->Dict[str,Any]:
+    def execute(self,request:str,user_id:Optional[int]=None,session_key:str="",provider_hint:str="",exclude_categories:Optional[List[str]]=None)->Dict[str,Any]:
         request=(request or "").strip()
         if not request: raise ValueError("request খালি রাখা যাবে না")
         ctx=self.context.collect(user_id or 0,session_key or str(user_id or "anonymous"),request)
-        key=self._hash(request,ctx); cached=self._cache.get(key)
+        hash_ctx=dict(ctx)
+        hash_ctx["_exclude_categories"]=sorted(_normalize_exclude_categories(exclude_categories))
+        key=self._hash(request,hash_ctx); cached=self._cache.get(key)
         if cached and time.time()-cached[0]<PHASE16_DECISION_CACHE_TTL:
             return dict(cached[1],cached=True)
-        candidates=self._engine_candidates(request)
+        candidates=self._engine_candidates(request, exclude_categories=exclude_categories)
         # priority + confidence + context relevance; deterministic conflict resolution.
         for c in candidates:
             c["score"]=round(float(c["score"])+float(c["confidence"])*20+min(10,ctx["char_count"]/400),2)
@@ -4643,9 +4821,20 @@ class DecisionEngine(EngineInterface):
         # fuzzy বা relaxed ম্যাচও (আসল মিল কম থাকা সত্ত্বেও) উচ্চ-confidence এন্ট্রির কারণে
         # ভুল সরাসরি উত্তর দিয়ে দিতে পারে — তাই এই দুই stage-এ আসল ম্যাচ-কোয়ালিটিও
         # (payload["score"], search()-এ normalize করা 0..1) যথেষ্ট ভালো হতে হবে।
+        # Pattern/template-এর confidence_score এন্ট্রির নিজস্ব priority; matching quality নয় —
+        # তাই match_value request-এ significant/whole-word অংশ হতে হবে।
         match_quality_ok = True
-        if best["stage"] in ("knowledge", "documentation"):
-            match_quality_ok = float(best["payload"].get("score", 0) or 0) >= 0.6
+        try:
+            if best["stage"] in ("knowledge", "documentation"):
+                payload = best.get("payload") or {}
+                match_quality_ok = float((payload.get("score", 0) if isinstance(payload, dict) else 0) or 0) >= 0.6
+            elif best["stage"] == "pattern":
+                match_quality_ok = _pattern_match_quality_ok(request, best.get("payload"))
+            elif best["stage"] == "template":
+                match_quality_ok = _template_match_quality_ok(request, best.get("payload"))
+        except Exception as e:
+            logger.debug("Decision match-quality guard fallback to AI: %s", e)
+            match_quality_ok = False
         strategy="direct" if best["stage"] in ("knowledge","pattern","documentation","template") and best["confidence"]>=0.72 and match_quality_ok else "ai"
         decision={"request_hash":key,"stage":best["stage"],"strategy":strategy,"provider_hint":provider_hint,
                   "confidence":round(float(best["confidence"]),3),"score":best["score"],"candidate_count":len(candidates),
@@ -4706,7 +4895,7 @@ def api_delete_context(context_id:int): return context_engine_service.delete_con
 def api_restore_context(context_id:int): return context_engine_service.restore_context(context_id)
 def api_get_active_context(user_id:int,session_key:str,limit:int=30): return context_engine_service.get_active_context(user_id,session_key,limit)
 def api_search_context(user_id:int,query:str): return context_engine_service.search_context(user_id,query)
-def api_decision_execute(request:str,user_id:Optional[int]=None,session_key:str="",provider_hint:str=""): return decision_engine_service.execute(request,user_id,session_key,provider_hint)
+def api_decision_execute(request:str,user_id:Optional[int]=None,session_key:str="",provider_hint:str="",exclude_categories:Optional[List[str]]=None): return decision_engine_service.execute(request,user_id,session_key,provider_hint,exclude_categories)
 def api_decision_history(user_id:Optional[int]=None,limit:int=100): return decision_engine_service.history(user_id,limit)
 def api_decision_analytics(user_id:Optional[int]=None): return decision_engine_service.analytics(user_id)
 def api_cache_management(clear:bool=False):
@@ -11324,6 +11513,37 @@ async def autonomous_implement_task(project:dict,task:dict) -> dict:
 
     autonomous_set_task_state(task["id"],"in_progress","implement","")
     task["status"]="in_progress"; task["workflow_stage"]="implement"
+    # Coding-context Decision Engine — greeting/bot_info ক্যাটাগরি এখানেও বাদ।
+    # ব্যর্থ/অপ্রাসঙ্গিক হলে নিচের AI রুটে পড়ে (non-fatal)।
+    try:
+        decision_request = (
+            f"Project: {project.get('name','')}\nStack: {project.get('stack','')}\n"
+            f"Task: {task.get('title','')}\nDescription: {task.get('description','')}"
+        )
+        decision = await decision_engine_service.execute_async(
+            decision_request,
+            user_id=project.get("user_id"),
+            session_key=str(project.get("id") or ""),
+            exclude_categories=list(CODING_EXCLUDED_BRAIN_CATEGORIES),
+        )
+        if decision.get("strategy") == "direct":
+            direct_code = _strip_code_fences(_brain_payload_to_answer(decision.get("payload")))
+            if direct_code and _coding_result_looks_like_code(direct_code, project.get("stack", "")):
+                ok, detail = autonomous_syntax_hook(direct_code, project.get("stack", "python"))
+                if ok:
+                    save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}", status="done")
+                    autonomous_set_task_state(task["id"], "done", "implement", "")
+                    task.update({
+                        "status": "done",
+                        "code": direct_code,
+                        "source": f"brain:{decision.get('stage', 'direct')}",
+                        "workflow_stage": "implement",
+                    })
+                    autonomous_record_success(task, project)
+                    return task
+                logger.info("Phase 20 Decision Engine code rejected by syntax hook: %s", detail)
+    except Exception as e:
+        logger.debug("Phase 20 coding Decision Engine fallback to AI: %s", e)
     try:
         ctx=await asyncio.to_thread(build_smart_context,project.get("user_id"),task["description"]+"\nTarget files: "+task.get("target_files", ""))
         impact_ctx=build_phase28_context(task.get("phase28_impact",{}),6500) if task.get("phase28_impact") else "Phase 28 impact context unavailable; Confidence: LOW"
@@ -11985,6 +12205,68 @@ async def codeplan_command(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 # ---- Task Split + Assemble ----
 
+def _looks_like_programming_stack(stack: str) -> bool:
+    """Coding-orchestrator task-এর stack কি কোড-সদৃশ আর্টিফ্যাক্ট আশা করে?"""
+    try:
+        s = (stack or "").strip().lower()
+        if not s or s in ("unknown", "অজানা") or "অজানা" in s:
+            return True
+        non_code = ("docs", "documentation", "markdown", "writing", "copy", "prose")
+        if any(n == s or n in s.split() for n in non_code) and not any(
+            h in s for h in ("python", "js", "javascript", "html", "css")
+        ):
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
+    """Safety net: greeting/bot-info FAQ যেন coding task-এর `code` ফিল্ডে সেভ না হয়।
+
+    stack যদি প্রোগ্রামিং ভাষা (বা অজানা coding-context) হয় এবং রেজাল্টে কোনো
+    কোড-সদৃশ প্যাটার্ন না থাকে, False — কলার তখন AI রুটে যায়। FAQ ফিঙ্গারপ্রিন্ট
+    পেলে সরাসরি False। কোনো এক্সসেপশনে False (safe fallback)।
+    """
+    try:
+        blob = str(text or "")
+        if not blob.strip():
+            return False
+        if not _looks_like_programming_stack(stack):
+            return True
+        faq_needles = (
+            "সব কমান্ডের তালিকা",
+            "/help অথবা /menu",
+            "/menu অথবা /help",
+            "আপনাকেও ধন্যবাদ",
+            "you're welcome",
+            "how can i help you",
+            "আমি আপনাকে কীভাবে সাহায্য",
+            "type your question or use /menu",
+            "লিখুন অথবা /menu",
+            "আসসালামু আলাইকুম / হ্যালো",
+        )
+        if any(n in blob or n in blob.lower() for n in faq_needles):
+            return False
+        markers = (
+            "def ", "async def", "import ", "from ", "class ",
+            "function ", "const ", "let ", "var ", "=>",
+            "=", "{", "(", "[",
+            "```", "#!/", "<?", "<html", "<!doctype",
+            "pip ", "npm ", "__pycache__",
+            "package.json", "module.exports", "print(",
+        )
+        lowered = blob.lower()
+        if any((m in blob) or (m.lower() in lowered) for m in markers):
+            return True
+        lines = [ln for ln in blob.splitlines() if ln.strip()]
+        if len(lines) >= 3 and any(ch in blob for ch in ("/", "*", ".", "-", "#")):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 async def process_next_code_task(project: dict):
     """
     Task Split: পরের pending ধাপটা নেয়। Knowledge Base-এ মিলে গেলে AI ছাড়াই কোড বসায়,
@@ -11998,28 +12280,55 @@ async def process_next_code_task(project: dict):
     kb_match = match_knowledge_base(task["title"], task["description"], project["name"], project["description"])
     if kb_match:
         label, code = kb_match
+        try:
+            if not _coding_result_looks_like_code(code, project.get("stack", "")):
+                logger.info(
+                    "KB match '%s' rejected by code-sanity check (stack=%s)",
+                    label, project.get("stack"),
+                )
+                kb_match = None
+        except Exception as e:
+            logger.debug("KB code-sanity check fallback to AI: %s", e)
+            kb_match = None
+    if kb_match:
+        label, code = kb_match
         save_task_result(task["id"], code, source=f"knowledge_base:{label}")
         task["code"], task["source"], task["status"] = code, f"knowledge_base:{label}", "done"
         brain_os_metrics["direct_answers"] += 1
         return task
 
     # Phase 17: Decision Engine gets a chance before a coding AI call.
+    # greeting/bot_info ক্যাটাগরি coding-context-এ কখনোই সঠিক উত্তর নয়।
     decision_request = (
         f"Project: {project['name']}\nStack: {project['stack']}\n"
         f"Task: {task['title']}\nDescription: {task['description']}"
     )
     try:
         decision = await decision_engine_service.execute_async(
-            decision_request, user_id=project.get("user_id"), session_key=str(project["id"])
+            decision_request,
+            user_id=project.get("user_id"),
+            session_key=str(project["id"]),
+            exclude_categories=list(CODING_EXCLUDED_BRAIN_CATEGORIES),
         )
         if decision.get("strategy") == "direct":
             direct_code = _brain_payload_to_answer(decision.get("payload"))
             if direct_code:
                 direct_code = _strip_code_fences(direct_code)
-                save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
-                task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
-                brain_os_metrics["direct_answers"] += 1
-                return task
+                code_ok = False
+                try:
+                    code_ok = _coding_result_looks_like_code(direct_code, project.get("stack", ""))
+                except Exception as e:
+                    logger.debug("Decision code-sanity check fallback to AI: %s", e)
+                    code_ok = False
+                if code_ok:
+                    save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
+                    task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
+                    brain_os_metrics["direct_answers"] += 1
+                    return task
+                logger.info(
+                    "Decision Engine direct answer rejected by code-sanity (stage=%s)",
+                    decision.get("stage"),
+                )
             brain_os_metrics["direct_failures"] += 1
     except Exception as e:
         logger.warning("Phase 17 coding Decision Engine fallback: %s", e)
