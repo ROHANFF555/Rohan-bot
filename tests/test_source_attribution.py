@@ -1950,6 +1950,27 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.assertIn("গুছানো উত্তর।", answer)
         self.assertIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
 
+    def test_automatic_browse_skips_ai_for_clean_bengali_wikipedia_result(self):
+        browse_result = {
+            "text": "ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।",
+            "source": "Wikipedia (bn)",
+            "url": "https://bn.wikipedia.org/wiki/ঢাকা",
+            "tried_sources": ["DuckDuckGo Instant Answer", "Wikipedia (bn)"],
+            "matched_source": "Wikipedia (bn)",
+        }
+        ask_ai = AsyncMock(return_value="এই মানটা ব্যবহার হওয়ার কথা নয়")
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(return_value=browse_result)
+        ), patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "ঢাকার রাজধানী সম্পর্কে বলো", "বাংলা", False)
+            )
+        ask_ai.assert_not_awaited()
+        self.assertIn("ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।", answer)
+        self.assertIn("_উৎস: 🌐 ব্রাউজার সার্চ_", answer)
+        self.assertNotIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        self.assertNotIn("🔄 সম্মিলিত", answer)
+
     def test_automatic_browse_raw_when_no_api_mode(self):
         self.main.set_no_api_mode(USER_ID, True)
         self.addCleanup(self.main.set_no_api_mode, USER_ID, False)
