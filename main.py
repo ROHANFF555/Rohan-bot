@@ -7404,6 +7404,12 @@ async def _browse_real_search(query: str, lang_hint: str = "") -> Optional[Dict[
         return None
 
 
+def _browse_target_wikipedia_lang(lang_hint: str = "") -> str:
+    """Browse Search-এ Wikipedia কোন ভাষায় জিজ্ঞেস করা হবে সেটা নির্ধারণ করে।"""
+    hint = (lang_hint or "").strip().lower()
+    return "bn" if ("bengali" in hint or "bangla" in hint or "বাংলা" in hint or hint == "bn") else "en"
+
+
 async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[str, str]]:
     """Brain OS ডাটাবেজে সরাসরি উত্তর না পেলে এখান থেকে ফ্রি Browse Search করা হয়।
     ক্রম (Phase 48): Tavily Real Web Search (TAVILY_API_KEY থাকলে) -> DuckDuckGo
@@ -7443,8 +7449,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         result["matched_source"] = "DuckDuckGo Instant Answer"
         return result
 
-    hint = (lang_hint or "").strip().lower()
-    wiki_lang = "bn" if ("bengali" in hint or "bangla" in hint or "বাংলা" in hint or hint == "bn") else "en"
+    wiki_lang = _browse_target_wikipedia_lang(lang_hint)
     tried_sources.append(f"Wikipedia ({wiki_lang})")
     logger.info(f"[Browse Search] Wikipedia ({wiki_lang}) চেষ্টা করা হচ্ছে | query: {query!r}")
     result = await _browse_wikipedia(query, lang=wiki_lang)
@@ -7561,6 +7566,24 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         logger.debug(f"Phase 44 AI উত্তর Knowledge Engine-এ সেভ করা যায়নি: {e}")
 
 
+def _browse_result_needs_ai_organization(
+    found: Optional[Dict[str, Any]], raw_text: str
+) -> bool:
+    """কোন browse ফলাফল AI দিয়ে গুছিয়ে লেখা দরকার তা নির্ধারণ করে।"""
+    matched_source = str(
+        ((found or {}).get("matched_source") or (found or {}).get("source") or "")
+    ).strip()
+    if matched_source == "DuckDuckGo Instant Answer":
+        return True
+    if matched_source == "Tavily Web Search":
+        return bool(
+            raw_text.startswith("• ")
+            or "\n• " in raw_text
+            or "\n\n• " in raw_text
+        )
+    return False
+
+
 async def _automatic_browse_answer(
     user_id: int, query: str, lang_hint: str, no_api_mode: bool, *, command: str = "chat"
 ) -> str:
@@ -7595,28 +7618,36 @@ async def _automatic_browse_answer(
         final_text = raw_text
 
         if not no_api_mode:
-            # No API Call Mode বন্ধ থাকলে AI-কে ছোট্ট একটা কল করে কাঁচা browse ফলাফলটা ইউজারের
-            # ভাষায় সাজিয়ে-গুছিয়ে লেখা হয় (তখন উত্তরটা 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
-            # চালু থাকলে কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
-            try:
-                organize_prompt = (
-                    "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
-                    f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_hint} ভাষায় সংক্ষেপে ও "
-                    "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
-                    "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
-                )
-                organize_input = (
-                    f"ইউজারের প্রশ্ন: {query}\n\nওয়েব সার্চের কাঁচা তথ্য "
-                    f"({found.get('source', '') or 'ওয়েব সার্চ'}):\n{raw_text}"
-                )
-                ai_result = (
-                    await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
-                ).strip()
-                if ai_result:
-                    final_text = ai_result
-                    organized_by_ai = True
-            except Exception as e:
-                logger.warning("Phase 47: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: %s", e)
+            target_lang_code = _browse_target_wikipedia_lang(lang_hint)
+            raw_lang_code = detect_language(raw_text)
+            should_organize_with_ai = (
+                raw_lang_code != target_lang_code
+                or _browse_result_needs_ai_organization(found, raw_text)
+            )
+
+            # No API Call Mode বন্ধ থাকলে এখন শুধু দরকার হলেই AI-কে ছোট্ট একটা কল করা হয়:
+            # ভাষা মেলেনি, অথবা সোর্সটা এমন যেটা সাধারণত fragment/snippet আকারে আসে।
+            # নাহলে কাঁচা, পরিষ্কার উত্তরটাই সরাসরি ফেরত যায় (🌐 Browser)।
+            if should_organize_with_ai:
+                try:
+                    organize_prompt = (
+                        "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
+                        f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_hint} ভাষায় সংক্ষেপে ও "
+                        "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
+                        "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
+                    )
+                    organize_input = (
+                        f"ইউজারের প্রশ্ন: {query}\n\nওয়েব সার্চের কাঁচা তথ্য "
+                        f"({found.get('source', '') or 'ওয়েব সার্চ'}):\n{raw_text}"
+                    )
+                    ai_result = (
+                        await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
+                    ).strip()
+                    if ai_result:
+                        final_text = ai_result
+                        organized_by_ai = True
+                except Exception as e:
+                    logger.warning("Phase 47: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: %s", e)
 
         metadata = metadata_from_browse_result(found, organized_by_ai=organized_by_ai, query=query)
         _phase44_save_browsed_knowledge(
