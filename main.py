@@ -7327,7 +7327,16 @@ async def _browse_wikipedia(query: str, lang: str = "bn") -> Optional[Dict[str, 
         if not text:
             return None
         page_url = ((summary.get("content_urls") or {}).get("desktop") or {}).get("page", "")
-        return {"text": text[:1800], "source": f"Wikipedia ({lang})", "url": page_url}
+        return {
+            "text": text[:1800],
+            "source": f"Wikipedia ({lang})",
+            "url": page_url,
+            # Issue C hardening: runtime সিদ্ধান্তে শুধু display source/URL regex-এর উপর
+            # নির্ভর না করে Wikipedia ভাষাটা explicit metadata হিসেবেও বহন করা হয়।
+            # এতে matched_source/source কোনো কারণে বদলে গেলেও `_browse_result_language_code()`
+            # Bengali Wikipedia-কে নির্ভরযোগ্যভাবে `bn` হিসেবে চিনতে পারে।
+            "source_lang_code": str(lang or "").strip().lower(),
+        }
     except Exception as e:
         logger.debug(f"Phase 44 Wikipedia({lang}) Browse Search ব্যর্থ: {e}")
         return None
@@ -7457,6 +7466,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         logger.info(f"[Browse Search] Wikipedia ({wiki_lang}) থেকে উত্তর পাওয়া গেছে | query: {query!r}")
         result["tried_sources"] = tried_sources.copy()
         result["matched_source"] = f"Wikipedia ({wiki_lang})"
+        result["source_lang_code"] = str(result.get("source_lang_code") or wiki_lang).strip().lower()
         return result
 
     if wiki_lang != "en":
@@ -7467,6 +7477,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
             logger.info(f"[Browse Search] Wikipedia (en) থেকে উত্তর পাওয়া গেছে | query: {query!r}")
             result["tried_sources"] = tried_sources.copy()
             result["matched_source"] = "Wikipedia (en)"
+            result["source_lang_code"] = str(result.get("source_lang_code") or "en").strip().lower()
             return result
 
     logger.info(f"[Browse Search] সব সোর্স ব্যর্থ, কিছুই পাওয়া যায়নি | tried: {tried_sources} | query: {query!r}")
@@ -7569,16 +7580,37 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
 def _browse_result_language_code(found: Optional[Dict[str, Any]]) -> str:
     """Wikipedia source name বা metadata থেকে language code extract করে (যেমন: bn, en)।"""
     if not isinstance(found, dict):
+        logger.info(
+            f"[DEBUG] _browse_result_language_code(): invalid found type: {type(found).__name__}"
+        )
         return ""
+    logger.info(f"[DEBUG] _browse_result_language_code() input keys: {found.keys()}")
+    for key in ("source_lang_code", "language_code", "lang", "wiki_lang"):
+        val = str(found.get(key) or "").strip().replace("_", "-").lower()
+        logger.info(f"[DEBUG] _browse_result_language_code() metadata {key}: '{val}'")
+        if re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]+)?", val, re.IGNORECASE):
+            logger.info(
+                f"[DEBUG] _browse_result_language_code() matched metadata {key}: '{val}'"
+            )
+            return val
     for key in ("matched_source", "source"):
         val = str(found.get(key) or "").strip()
+        logger.info(f"[DEBUG] _browse_result_language_code() inspecting {key}: {val!r}")
         m = re.search(r"wikipedia\s*\(([a-zA-Z_\-]+)\)", val, re.IGNORECASE)
         if m:
-            return m.group(1).lower()
+            extracted = m.group(1).replace("_", "-").lower()
+            logger.info(
+                f"[DEBUG] _browse_result_language_code() matched {key}: '{extracted}'"
+            )
+            return extracted
     url = str(found.get("url") or "").strip()
+    logger.info(f"[DEBUG] _browse_result_language_code() inspecting url: {url!r}")
     m_url = re.search(r"https?://([a-zA-Z_\-]+)\.wikipedia\.org", url, re.IGNORECASE)
     if m_url:
-        return m_url.group(1).lower()
+        extracted = m_url.group(1).replace("_", "-").lower()
+        logger.info(f"[DEBUG] _browse_result_language_code() matched url: '{extracted}'")
+        return extracted
+    logger.info("[DEBUG] _browse_result_language_code() no language code extracted")
     return ""
 
 
@@ -7636,11 +7668,27 @@ async def _automatic_browse_answer(
         if not no_api_mode:
             target_lang_code = _browse_target_wikipedia_lang(lang_hint)
             source_lang_code = _browse_result_language_code(found)
+
+            # DEBUG LOGS (Issue C): live runtime-এ Bengali Wikipedia ফলাফল কেন AI organization
+            # ট্রিগার করছে তা বোঝার জন্য source metadata/language সিদ্ধান্তগুলো দেখা হচ্ছে।
+            logger.info(f"[DEBUG] found dict keys: {found.keys()}")
+            logger.info(f"[DEBUG] found['matched_source']: {found.get('matched_source')}")
+            logger.info(f"[DEBUG] found['source']: {found.get('source')}")
+            logger.info(f"[DEBUG] found['url']: {found.get('url')}")
+            logger.info(f"[DEBUG] target_lang_code: {target_lang_code}")
+            logger.info(f"[DEBUG] source_lang_code extracted: '{source_lang_code}'")
+
             raw_lang_code = source_lang_code or detect_language(raw_text)
+            logger.info(f"[DEBUG] raw_lang_code (from source or detect): '{raw_lang_code}'")
+
+            needs_ai_organization = _browse_result_needs_ai_organization(found, raw_text)
             should_organize_with_ai = (
                 raw_lang_code != target_lang_code
-                or _browse_result_needs_ai_organization(found, raw_text)
+                or needs_ai_organization
             )
+            logger.info(f"[DEBUG] should_organize_with_ai: {should_organize_with_ai}")
+            logger.info(f"[DEBUG] raw_lang_code != target_lang_code: {raw_lang_code != target_lang_code}")
+            logger.info(f"[DEBUG] _browse_result_needs_ai_organization(): {needs_ai_organization}")
 
             # No API Call Mode বন্ধ থাকলে এখন শুধু দরকার হলেই AI-কে ছোট্ট একটা কল করা হয়:
             # ভাষা মেলেনি, অথবা সোর্সটা এমন যেটা সাধারণত fragment/snippet আকারে আসে।
