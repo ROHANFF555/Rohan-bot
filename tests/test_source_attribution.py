@@ -1867,6 +1867,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         result = run(self.main._browse_wikipedia("ঢাকা", lang="bn"))
         self.assertEqual(result["text"], "ঢাকা বাংলাদেশের রাজধানী।")
         self.assertEqual(result["url"], "https://bn.wikipedia.org/wiki/ঢাকা")
+        self.assertEqual(result["source_lang_code"], "bn")
         self.assertEqual(len(client.calls), 2)
 
     def test_browse_wikipedia_failures_return_none(self):
@@ -1978,12 +1979,37 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.assertEqual(extract({"source": "Wikipedia (en)"}), "en")
         self.assertEqual(extract({"matched_source": "Wikipedia (en)"}), "en")
         self.assertEqual(extract({"source": "Wikipedia (es)"}), "es")
+        self.assertEqual(extract({"source_lang_code": "bn", "source": "Wikipedia"}), "bn")
+        self.assertEqual(extract({"language_code": "en_US", "source": "Wikipedia"}), "en-us")
         self.assertEqual(extract({"url": "https://bn.wikipedia.org/wiki/ঢাকা"}), "bn")
         self.assertEqual(extract({"url": "https://en.wikipedia.org/wiki/London"}), "en")
         self.assertEqual(extract({"source": "DuckDuckGo Instant Answer"}), "")
         self.assertEqual(extract({"source": "Tavily Web Search"}), "")
         self.assertEqual(extract({}), "")
         self.assertEqual(extract(None), "")
+
+    def test_automatic_browse_skips_ai_for_bengali_wikipedia_with_explicit_lang_metadata(self):
+        """Runtime source label বদলে গেলেও explicit source_lang_code থাকলে AI কল স্কিপ হবে।"""
+        browse_result = {
+            "text": "ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।",
+            "source": "Wikipedia",
+            "url": "https://example.invalid/wiki/ঢাকা",
+            "tried_sources": ["DuckDuckGo Instant Answer", "Wikipedia (bn)"],
+            "matched_source": "Wikipedia",
+            "source_lang_code": "bn",
+        }
+        ask_ai = AsyncMock(return_value="এই মানটা ব্যবহার হওয়ার কথা নয়")
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(return_value=browse_result)
+        ), patch.object(
+            self.main, "detect_language", return_value="id"
+        ), patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "ঢাকার রাজধানী সম্পর্কে বলো", "বাংলা", False)
+            )
+        ask_ai.assert_not_awaited()
+        self.assertIn("ঢাকা বাংলাদেশের রাজধানী", answer)
+        self.assertNotIn("🔵 Groq API", answer)
 
     def test_automatic_browse_skips_ai_for_bengali_wikipedia_when_detect_language_is_flaky(self):
         browse_result = {
