@@ -7566,6 +7566,22 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         logger.debug(f"Phase 44 AI উত্তর Knowledge Engine-এ সেভ করা যায়নি: {e}")
 
 
+def _browse_result_language_code(found: Optional[Dict[str, Any]]) -> str:
+    """Wikipedia source name বা metadata থেকে language code extract করে (যেমন: bn, en)।"""
+    if not isinstance(found, dict):
+        return ""
+    for key in ("matched_source", "source"):
+        val = str(found.get(key) or "").strip()
+        m = re.search(r"wikipedia\s*\(([a-zA-Z_\-]+)\)", val, re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+    url = str(found.get("url") or "").strip()
+    m_url = re.search(r"https?://([a-zA-Z_\-]+)\.wikipedia\.org", url, re.IGNORECASE)
+    if m_url:
+        return m_url.group(1).lower()
+    return ""
+
+
 def _browse_result_needs_ai_organization(
     found: Optional[Dict[str, Any]], raw_text: str
 ) -> bool:
@@ -7619,7 +7635,8 @@ async def _automatic_browse_answer(
 
         if not no_api_mode:
             target_lang_code = _browse_target_wikipedia_lang(lang_hint)
-            raw_lang_code = detect_language(raw_text)
+            source_lang_code = _browse_result_language_code(found)
+            raw_lang_code = source_lang_code or detect_language(raw_text)
             should_organize_with_ai = (
                 raw_lang_code != target_lang_code
                 or _browse_result_needs_ai_organization(found, raw_text)

@@ -1971,6 +1971,85 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         self.assertNotIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
         self.assertNotIn("🔄 সম্মিলিত", answer)
 
+    def test_browse_result_language_code_helper(self):
+        extract = self.main._browse_result_language_code
+        self.assertEqual(extract({"source": "Wikipedia (bn)"}), "bn")
+        self.assertEqual(extract({"matched_source": "Wikipedia (bn)"}), "bn")
+        self.assertEqual(extract({"source": "Wikipedia (en)"}), "en")
+        self.assertEqual(extract({"matched_source": "Wikipedia (en)"}), "en")
+        self.assertEqual(extract({"source": "Wikipedia (es)"}), "es")
+        self.assertEqual(extract({"url": "https://bn.wikipedia.org/wiki/ঢাকা"}), "bn")
+        self.assertEqual(extract({"url": "https://en.wikipedia.org/wiki/London"}), "en")
+        self.assertEqual(extract({"source": "DuckDuckGo Instant Answer"}), "")
+        self.assertEqual(extract({"source": "Tavily Web Search"}), "")
+        self.assertEqual(extract({}), "")
+        self.assertEqual(extract(None), "")
+
+    def test_automatic_browse_skips_ai_for_bengali_wikipedia_when_detect_language_is_flaky(self):
+        browse_result = {
+            "text": "ড. মুহাম্মদ ইউনূস বাংলাদেশের অন্তর্বর্তীকালীন সরকারের প্রধান উপদেষ্টা।",
+            "source": "Wikipedia (bn)",
+            "url": "https://bn.wikipedia.org/wiki/মুহাম্মদ_ইউনূস",
+            "tried_sources": ["DuckDuckGo Instant Answer", "Wikipedia (bn)"],
+            "matched_source": "Wikipedia (bn)",
+        }
+        ask_ai = AsyncMock(return_value="ভুল AI কল")
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(return_value=browse_result)
+        ), patch.object(
+            self.main, "detect_language", return_value="id"
+        ), patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "বাংলাদেশের প্রধানমন্ত্রী কে?", "বাংলা", False)
+            )
+        ask_ai.assert_not_awaited()
+        self.assertIn("ড. মুহাম্মদ ইউনূস", answer)
+        self.assertIn("_উৎস: 🌐 ব্রাউজার সার্চ_", answer)
+        self.assertNotIn("🔵 Groq API", answer)
+        self.assertNotIn("🔄 সম্মিলিত", answer)
+
+    def test_automatic_browse_skips_ai_for_clean_english_wikipedia_result(self):
+        browse_result = {
+            "text": "London is the capital and largest city of England and the United Kingdom.",
+            "source": "Wikipedia (en)",
+            "url": "https://en.wikipedia.org/wiki/London",
+            "tried_sources": ["DuckDuckGo Instant Answer", "Wikipedia (en)"],
+            "matched_source": "Wikipedia (en)",
+        }
+        ask_ai = AsyncMock(return_value="Unwanted AI response")
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(return_value=browse_result)
+        ), patch.object(
+            self.main, "detect_language", return_value="fr"
+        ), patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "What is the capital of England?", "English", False)
+            )
+        ask_ai.assert_not_awaited()
+        self.assertIn("London is the capital", answer)
+        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
+        self.assertNotIn("🔵 Groq API", answer)
+        self.assertNotIn("🔄", answer)
+
+    def test_automatic_browse_calls_ai_when_wikipedia_lang_mismatches_target_lang(self):
+        browse_result = {
+            "text": "Muhammad Yunus is a Bangladeshi social entrepreneur, banker, and civil society leader.",
+            "source": "Wikipedia (en)",
+            "url": "https://en.wikipedia.org/wiki/Muhammad_Yunus",
+            "tried_sources": ["DuckDuckGo Instant Answer", "Wikipedia (bn)", "Wikipedia (en)"],
+            "matched_source": "Wikipedia (en)",
+        }
+        ask_ai = AsyncMock(return_value="মুহাম্মদ ইউনূস হলেন একজন বাংলাদেশী নোবেল বিজয়ী অর্থনীতিবিদ।")
+        with patch.object(
+            self.main, "browse_web_search", new=AsyncMock(return_value=browse_result)
+        ), patch.object(self.main, "ask_ai", new=ask_ai):
+            answer = run(
+                self.main._automatic_browse_answer(USER_ID, "মুহাম্মদ ইউনূস কে?", "বাংলা", False)
+            )
+        ask_ai.assert_awaited_once()
+        self.assertIn("মুহাম্মদ ইউনূস হলেন একজন বাংলাদেশী", answer)
+        self.assertIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+
     def test_automatic_browse_raw_when_no_api_mode(self):
         self.main.set_no_api_mode(USER_ID, True)
         self.addCleanup(self.main.set_no_api_mode, USER_ID, False)
