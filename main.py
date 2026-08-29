@@ -7617,19 +7617,13 @@ def _browse_result_language_code(found: Optional[Dict[str, Any]]) -> str:
 def _browse_result_needs_ai_organization(
     found: Optional[Dict[str, Any]], raw_text: str
 ) -> bool:
-    """কোন browse ফলাফল AI দিয়ে গুছিয়ে লেখা দরকার তা নির্ধারণ করে।"""
-    matched_source = str(
-        ((found or {}).get("matched_source") or (found or {}).get("source") or "")
-    ).strip()
-    if matched_source == "DuckDuckGo Instant Answer":
-        return True
-    if matched_source == "Tavily Web Search":
-        return bool(
-            raw_text.startswith("• ")
-            or "\n• " in raw_text
-            or "\n\n• " in raw_text
-        )
-    return False
+    """[DEPRECATED - Phase 49]
+
+    Previously used to decide if browse content needs formatting via AI.
+    No longer called — browser content is returned as-is (content is already well-formatted).
+    Kept for backward compatibility. Always returns False.
+    """
+    return False  # Disabled in Phase 49 — no AI organization for browse content
 
 
 async def _automatic_browse_answer(
@@ -7643,8 +7637,9 @@ async def _automatic_browse_answer(
 
       - `browse_web_search()`: Tavily Real Web Search (Key থাকলে, Phase 48) →
         DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) → Wikipedia (en)।
-      - No API Call Mode বন্ধ থাকলে: AI-কে ছোট্ট একটা কল করে কাঁচা তথ্যটা ইউজারের ভাষায়
-        সাজিয়ে-গুছিয়ে নেওয়া হয় (তখন ব্যাজ 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
+      - No API Call Mode বন্ধ থাকলে: শুধু ব্রাউজার ফলাফলের ভাষা ইউজারের ভাষার সাথে না মিললে
+        AI-কে ছোট্ট একটা translate কল করা হয় (তখন ব্যাজ 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
+        একই ভাষার clean ব্রাউজার ফলাফল সরাসরি ফেরত যায় (🌐 Browser) — কোনো AI কল ছাড়াই।
       - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
 
     উত্তরের নিচে উৎস-ব্যাজ যুক্ত হয় — কোন সোর্স থেকে এসেছে, কোন কোন সোর্স চেক করা হয়েছিল,
@@ -7668,56 +7663,27 @@ async def _automatic_browse_answer(
         if not no_api_mode:
             target_lang_code = _browse_target_wikipedia_lang(lang_hint)
             source_lang_code = _browse_result_language_code(found)
-
-            # DEBUG LOGS (Issue C): live runtime-এ Bengali Wikipedia ফলাফল কেন AI organization
-            # ট্রিগার করছে তা বোঝার জন্য source metadata/language সিদ্ধান্তগুলো দেখা হচ্ছে।
-            logger.info(f"[DEBUG] found dict keys: {found.keys()}")
-            logger.info(f"[DEBUG] found['matched_source']: {found.get('matched_source')}")
-            logger.info(f"[DEBUG] found['source']: {found.get('source')}")
-            logger.info(f"[DEBUG] found['url']: {found.get('url')}")
-            logger.info(f"[DEBUG] target_lang_code: {target_lang_code}")
-            logger.info(f"[DEBUG] source_lang_code extracted: '{source_lang_code}'")
-
             raw_lang_code = source_lang_code or detect_language(raw_text)
-            logger.info(f"[DEBUG] raw_lang_code (from source or detect): '{raw_lang_code}'")
 
-            needs_ai_organization = _browse_result_needs_ai_organization(found, raw_text)
-            should_organize_with_ai = (
-                raw_lang_code != target_lang_code
-                or needs_ai_organization
-            )
-            logger.info(f"[DEBUG] should_organize_with_ai: {should_organize_with_ai}")
-            logger.info(f"[DEBUG] raw_lang_code != target_lang_code: {raw_lang_code != target_lang_code}")
-            logger.info(f"[DEBUG] _browse_result_needs_ai_organization(): {needs_ai_organization}")
-
-            # No API Call Mode বন্ধ থাকলে এখন শুধু দরকার হলেই AI-কে ছোট্ট একটা কল করা হয়:
-            # ভাষা মেলেনি, অথবা সোর্সটা এমন যেটা সাধারণত fragment/snippet আকারে আসে।
-            # নাহলে কাঁচা, পরিষ্কার উত্তরটাই সরাসরি ফেরত যায় (🌐 Browser)।
-            if should_organize_with_ai:
+            # Phase 49: Only organize with AI if actual language translation is needed
+            # DO NOT call AI for formatting/beautification of already-clean content
+            if raw_lang_code != target_lang_code:
+                # Language mismatch: translate to user's language
                 try:
-                    organize_prompt = (
-                        "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
-                        f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_hint} ভাষায় সংক্ষেপে ও "
-                        "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
-                        "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
-                    )
-                    organize_input = (
-                        f"ইউজারের প্রশ্ন: {query}\n\nওয়েব সার্চের কাঁচা তথ্য "
-                        f"({found.get('source', '') or 'ওয়েব সার্চ'}):\n{raw_text}"
+                    translate_prompt = (
+                        "আপনি একজন ভাষা অনুবাদক। নিচের পাঠ্যটি সঠিকভাবে অনুবাদ করুন, "
+                        "অন্য কোনো পরিবর্তন করবেন না। নতুন তথ্য যোগ করবেন না।"
                     )
                     ai_result = (
-                        await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
+                        await ask_ai(translate_prompt, raw_text, use_cache=False, user_id=user_id)
                     ).strip()
                     if ai_result:
                         final_text = ai_result
                         organized_by_ai = True
                 except Exception as e:
-                    logger.warning("Phase 47: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: %s", e)
+                    logger.info("Browse result translation failed, using original: %s", e)
 
         metadata = metadata_from_browse_result(found, organized_by_ai=organized_by_ai, query=query)
-        _phase44_save_browsed_knowledge(
-            query, final_text, found.get("source", "") or "ওয়েব সার্চ", found.get("url", "") or ""
-        )
 
         badged = attach_source_badge(final_text, metadata, command, attribution_lang(user_id))
         if badged == final_text:
