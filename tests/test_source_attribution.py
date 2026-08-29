@@ -1744,15 +1744,17 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
         """কোনো /search কমান্ড ছাড়াই DB miss-এ Browser Search স্বয়ংক্রিয়ভাবে চলে।"""
         decision = {"strategy": "ai", "stage": "ai", "confidence": 0.1}
         client = self.install_http(ddg=ddg_ok("স্বয়ংক্রিয় ওয়েব তথ্য।"))
+        ask_ai = AsyncMock(return_value="এই মানটা ব্যবহার হওয়ার কথা নয়")
         with patch.object(
             self.main, "_phase17_decide", new=AsyncMock(return_value=decision)
         ), patch.object(
-            self.main, "ask_ai", new=AsyncMock(return_value="গুছানো ওয়েব উত্তর।")
+            self.main, "ask_ai", new=ask_ai
         ), patch.object(
             self.main, "should_show_own_key_hint", return_value=False
         ):
             text = self.chat("স্বয়ংক্রিয় প্রশ্ন")
-        self.assertIn("গুছানো ওয়েব উত্তর।", text)
+        ask_ai.assert_not_awaited()
+        self.assertIn("স্বয়ংক্রিয় ওয়েব তথ্য।", text)
         self.assertIn("🌐 ব্রাউজার সার্চ", text)
         self.assertTrue(client.hit("duckduckgo.com"))
 
@@ -1940,16 +1942,19 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             run(self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)), ""
         )
 
-    def test_automatic_browse_hybrid_badge_when_ai_organizes(self):
+    def test_automatic_browse_skips_ai_for_same_language_ddg_result(self):
+        """Phase 49: একই ভাষার clean DDG ফলাফলে AI কল হয় না — সরাসরি ব্রাউজার ব্যাজে যায়।"""
         self.install_http(ddg=ddg_ok("কাঁচা তথ্য।"))
-        with patch.object(
-            self.main, "ask_ai", new=AsyncMock(return_value="গুছানো উত্তর।")
-        ):
+        ask_ai = AsyncMock(return_value="এই মানটা ব্যবহার হওয়ার কথা নয়")
+        with patch.object(self.main, "ask_ai", new=ask_ai):
             answer = run(
                 self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)
             )
-        self.assertIn("গুছানো উত্তর।", answer)
-        self.assertIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        ask_ai.assert_not_awaited()
+        self.assertIn("কাঁচা তথ্য।", answer)
+        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
+        self.assertNotIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        self.assertNotIn("🔄", answer)
 
     def test_automatic_browse_skips_ai_for_clean_bengali_wikipedia_result(self):
         browse_result = {
@@ -2102,13 +2107,13 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
     def test_automatic_browse_legacy_footer_when_attribution_disabled(self):
         with patch.dict(os.environ, {"SOURCE_ATTRIBUTION_ENABLED": "0"}):
             self.install_http(ddg=ddg_ok("কাঁচা তথ্য।"))
-            with patch.object(
-                self.main, "ask_ai", new=AsyncMock(return_value="গুছানো উত্তর।")
-            ):
+            ask_ai = AsyncMock(return_value="এই মানটা ব্যবহার হওয়ার কথা নয়")
+            with patch.object(self.main, "ask_ai", new=ask_ai):
                 answer = run(
                     self.main._automatic_browse_answer(USER_ID, "প্রশ্ন", "বাংলা", False)
                 )
-        self.assertIn("গুছানো উত্তর।", answer)
+        ask_ai.assert_not_awaited()
+        self.assertIn("কাঁচা তথ্য।", answer)
         self.assertIn("🔗 উৎস: https://bn.wikipedia.org/wiki/ঢাকা", answer)
         self.assertIn("🔎 চেক করা হয়েছে:", answer)
         self.assertNotIn("📊 উৎস তথ্য", answer)
