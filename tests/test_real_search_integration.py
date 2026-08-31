@@ -48,7 +48,16 @@ PM_WRONG_STALE = "খালেদা জিয়া (পুরোনো/ভু�
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # unittest discover-এ আগের কোনো test module asyncio.run() ব্যবহার করলে গ্লোবাল
+    # event loop None হয়ে যায় আর get_event_loop() RuntimeError ছোড়ে (Python 3.11+)।
+    # তখন নতুন loop বানিয়ে আগের মতোই গ্লোবালি সেট করি — এই হেল্পারের পুরোনো
+    # shared-loop আচরণ দুই রান-মোডেই অক্ষত থাকে।
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 def knowledge_metadata(main, knowledge_id) -> dict:

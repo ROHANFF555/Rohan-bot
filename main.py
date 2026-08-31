@@ -11721,6 +11721,19 @@ def match_knowledge_base(title: str, description: str, project_name: str = "", p
 
 DYNAMIC_PRINT_KB_LABEL = "dynamic_print"          # task.source → knowledge_base:dynamic_print
 DYNAMIC_PRINT_MSG_MAX_CHARS = 160                 # এর চেয়ে লম্বা বার্তা সহজ print টাস্কের নয় → অমিল ধরা হয়
+# রিকোয়েস্টে ভাষার নাম উল্লেখ না থাকলে dynamic-print কোড এই ডিফল্ট ভাষায় জেনারেট হয়
+# (বটের বাকি deterministic coding টেমপ্লেট/টুলিংয়ের ডিফল্ট ভাষাও python)।
+DEFAULT_DYNAMIC_PRINT_LANGUAGE = "python"
+
+# রিকোয়েস্টে স্পষ্টভাবে এমন ভাষার নাম থাকলে যেটা dynamic KB জানে না, জোর করে ডিফল্ট
+# python বসানো যাবে না — ভুল সিনট্যাক্সে টাস্ক 'done' হয়ে যাওয়ার ঝুঁকি থাকে। তখন
+# None (blocked/AI ফলব্যাক) — "জোর করে ভুল সিনট্যাক্স বসানো হয় না" নীতিই বজায় থাকে।
+_DYNAMIC_PRINT_UNSUPPORTED_LANG_RE = re.compile(
+    r"\brust\b|\bswift\b|\blua\b|\bperl\b|\bscala\b|\bdart\b|\bhaskell\b|\bclojure\b"
+    r"|\belixir\b|\bjulia\b|\br\b|\bmatlab\b|\bfortran\b|\bcobol\b|\bpascal\b"
+    r"|\bvb(?:\.net)?\b|\bobjective-?c\b|\bf#\b",
+    re.IGNORECASE,
+)
 
 # কোটেশন-শাখাটা চালু হবে কিনা — টেক্সটে কোথাও print/run-জাতীয় ইঙ্গিত থাকতে হবে।
 _DYNAMIC_PRINT_CONTEXT_RE = re.compile(
@@ -12008,6 +12021,30 @@ def match_dynamic_print_task(title: str, description: str, stack: str = "") -> O
     return DYNAMIC_PRINT_KB_LABEL, code
 
 
+def _match_dynamic_print_request(text: str) -> Optional[Tuple[str, str, str]]:
+    """রিকোয়েস্ট-টেক্সট থেকে deterministic dynamic-print ম্যাচ — (label, code, language)।
+
+    No API Mode-এ /codeproject প্ল্যানার (coding_analyze_and_plan) এটাই ব্যবহার করে —
+    dynamic_print_task ম্যাচার (match_dynamic_print_task) এর উপর ভর করে। ভাষা আগে
+    রিকোয়েস্ট থেকেই ধরা হয় ("python এ কোড লেখ..." জাতীয় উল্লেখ); উল্লেখ না থাকলে
+    ডিফল্ট ভাষা ধরে নেওয়া হয়। কিছু না মিললে None — কলার স্বাভাবিক ফ্লো/ফলব্যাকে
+    যায়, কখনো raise হয় না।
+    """
+    try:
+        # স্পষ্টভাবে unsupported ভাষার নাম থাকলে ডিফল্ট python জোর করা হয় না।
+        if _DYNAMIC_PRINT_UNSUPPORTED_LANG_RE.search(text or ""):
+            return None
+        language = _detect_dynamic_print_language(text) or DEFAULT_DYNAMIC_PRINT_LANGUAGE
+        match = match_dynamic_print_task("", text, language)
+        if not match:
+            return None
+        label, code = match
+        return label, code, language
+    except Exception as e:
+        logger.debug("deterministic dynamic-print request match failed: %s", e)
+        return None
+
+
 def _strip_code_fences(text: str) -> str:
     """AI-এর উত্তরে ```code``` মার্কডাউন ফেন্স থাকলে সেটা সরিয়ে শুধু আসল কোডটুকু রাখে।"""
     text = (text or "").strip()
@@ -12036,13 +12073,39 @@ def _extract_json_object(text: str):
         return None
 
 
-async def coding_analyze_and_plan(raw_request: str) -> dict:
+async def coding_analyze_and_plan(raw_request: str, user_id: int) -> dict:
     """
     Prompt Analyze + Project Plan: ইউজারের কোডিং রিকোয়েস্ট একবারেই AI-কে পাঠিয়ে (নাম,
     স্ট্যাক/ভাষা, এবং ধারাবাহিক ছোট ছোট ধাপের তালিকা) JSON আকারে ফেরত চাওয়া হয়। JSON পার্স করা
     না গেলেও ফিচারটা যেন কখনো ভেঙে না পড়ে, তাই পুরো রিকোয়েস্টটাকেই তখন একটামাত্র ধাপ ধরে
     ফলব্যাক করা হয়।
+
+    No API Call Mode গার্ড: AI কলের আগেই deterministic dynamic-print ম্যাচ চেষ্টা হয় —
+    "রান করলে <বার্তা> লেখা আসবে" ধরনের সাধারণ রিকোয়েস্ট AI ছাড়াই একটাই সঠিক ধাপে
+    resolve হয় (ask_ai কোনোভাবেই ডাকা হয় না)। কিছু না মিললে /codeplan-এর মতোই
+    single-task fallback প্ল্যান (no_api_blocked চিহ্নসহ) ফেরত যায়, আর
+    codeproject_command সেটা ইউজারকে জানিয়ে দেয়।
     """
+    # No API Mode চালু থাকলে ask_ai কল করার আগেই আটকানো হয় — dynamic-print ম্যাচে
+    # পড়লে deterministic এক-ধাপের প্ল্যান, নইলে blocked fallback (দুটোতেই AI কল নেই)।
+    if is_no_api_mode(user_id):
+        dynamic = _match_dynamic_print_request(raw_request)
+        if dynamic:
+            _label, _code, language = dynamic
+            return {
+                "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                "stack": language,
+                "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                "deterministic": True,
+            }
+        stuck_msg = build_no_api_stuck_message({"stage": "coding_plan_ai", "confidence": 0.0})
+        return {
+            "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+            "stack": "unknown",
+            "tasks": [{"title": "No API Mode চালু আছে", "description": stuck_msg}],
+            "fallback": True,
+            "no_api_blocked": True,
+        }
     system_prompt = (
         "তুমি একজন সিনিয়র সফটওয়্যার আর্কিটেক্ট। ইউজারের কোডিং রিকোয়েস্ট বিশ্লেষণ করে "
         f"সর্বোচ্চ {CODE_TASK_MAX_TASKS}টা ছোট, ধারাবাহিক (implementation order অনুযায়ী) ধাপে ভাগ করো। "
@@ -12193,6 +12256,19 @@ def get_next_pending_task(project_id: int):
     except Exception as e:
         logger.warning("Phase 20 get_next_pending_task failed: %s", e)
     return None
+
+
+def _is_first_task(project: dict) -> bool:
+    """এই প্রজেক্টে এখনো কোনো ধাপ 'done' হয়নি কিনা — অর্থাৎ এখন প্রসেস হওয়া ধাপটাই
+    প্রজেক্টের প্রথম ধাপ। process_next_code_task()-এর project-level dynamic-print
+    fallback শুধু তখনই বৈধ, যাতে multistep প্রজেক্টের পরের ধাপগুলোতে একই প্রিন্ট-কোড
+    বারবার stamp না হয়। DB-এরর হলে নিরাপদ দিক (False) — ফলব্যাক বন্ধ থাকে।"""
+    try:
+        tasks = get_project_tasks(project["id"])
+        return not any(t.get("status") == "done" for t in tasks)
+    except Exception as e:
+        logger.debug("_is_first_task check failed (treated as not-first): %s", e)
+        return False
 
 
 def save_task_result(task_id: int, code: str, source: str, status: str = "done"):
@@ -13593,6 +13669,23 @@ async def process_next_code_task(project: dict):
     except Exception as e:
         logger.debug("dynamic_print_task check failed (AI fallback): %s", e)
         dynamic_match = None
+    # Gap fix: প্ল্যান (AI-নির্মিত বা deterministic) একটা রিকোয়েস্টকে একাধিক generic
+    # ধাপে ভেঙে দিলে (যেমন "Initialize Project Folder", "Implement Success Message
+    # Function") কোনো ধাপের title/description-এই আসল "...রান করলে সফল হয়েছে লেখা
+    # আসবে" বাক্যটা থাকে না — অথচ project["description"]-এ আসল রিকোয়েস্ট অক্ষত থাকে।
+    # তাই প্রথম pending ধাপে (এখনো কোনো ধাপ done না হলে, _is_first_task) project-এর
+    # name+description-এর বিরুদ্ধেও একবার deterministic ম্যাচ চেষ্টা হয়। পরের
+    # ধাপগুলোতে আর চেষ্টা হয় না, তাই একই প্রিন্ট-কোড একাধিক ধাপে stamp হয় না।
+    # ম্যাচ ব্যর্থ হলে নিচের স্বাভাবিক ফ্লো (Decision Engine → AI/No API Mode গেট)
+    # অক্ষত থাকে — কখনো raise হয় না।
+    if not dynamic_match and _is_first_task(project):
+        try:
+            dynamic_match = match_dynamic_print_task(
+                project.get("name", ""), project.get("description", ""), project.get("stack", "")
+            )
+        except Exception as e:
+            logger.debug("dynamic_print_task project-level check failed (AI fallback): %s", e)
+            dynamic_match = None
     if dynamic_match:
         label, code = dynamic_match
         save_task_result(task["id"], code, source=f"knowledge_base:{label}")
@@ -15218,7 +15311,7 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     raw_request = " ".join(context.args).strip()
     thinking = await update.message.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...")
     try:
-        plan = await coding_analyze_and_plan(raw_request)
+        plan = await coding_analyze_and_plan(raw_request, user_id)
         project_id = create_code_project(user_id, plan["project_name"], raw_request, plan["stack"], plan["tasks"])
         project = get_project(project_id, owner_id=user_id)
         try:
@@ -15229,12 +15322,22 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception as e:
             logger.debug("Phase 17 project context save skipped: %s", e)
-        await send_long_text(
-            update,
-            "✅ প্রজেক্ট প্ল্যান তৈরি হয়েছে (এটাই এখন আপনার সক্রিয় প্রজেক্ট)।\n\n"
-            + build_project_status_text(project)
-            + "\n\nপরের ধাপ প্রসেস করতে /codenext লিখুন।",
-        )
+        if plan.get("no_api_blocked"):
+            # No API Mode-এ AI প্ল্যান হয়নি — "AI দিয়ে প্ল্যান তৈরি হয়েছে" দাবি না করে
+            # /codeplan-এর মতোই blocked মেসেজ দেখানো হয়।
+            await update.message.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
+        else:
+            deterministic_note = (
+                "\n\n🤖 এই প্ল্যানটি AI কল ছাড়াই deterministicভাবে তৈরি হয়েছে।"
+                if plan.get("deterministic") else ""
+            )
+            await send_long_text(
+                update,
+                "✅ প্রজেক্ট প্ল্যান তৈরি হয়েছে (এটাই এখন আপনার সক্রিয় প্রজেক্ট)।\n\n"
+                + build_project_status_text(project)
+                + deterministic_note
+                + "\n\nপরের ধাপ প্রসেস করতে /codenext লিখুন।",
+            )
     except AIProviderError as e:
         await update.message.reply_text(f"দুঃখিত, প্ল্যান বানাতে সমস্যা হয়েছে: {e}")
     except Exception as e:
