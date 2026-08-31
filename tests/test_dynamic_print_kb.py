@@ -121,6 +121,58 @@ class DynamicPrintKbTests(unittest.TestCase):
         self.assertIsNone(extract(None, None))  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
+    # 1b. Regression (false positive): UI/ফিচার-বর্ণনা প্রিন্ট-টাস্ক নয়
+    # ------------------------------------------------------------------
+    def test_ui_feature_description_is_not_a_print_task(self):
+        # রিপোর্ট হওয়া কেস: wizard-এর 'shows a "Welcome" screen' বাক্যটা ভুলে
+        # print("Welcome") জেনারেট করত — এটা UI ফিচার-বর্ণনা, প্রিন্ট-টাস্ক না।
+        title = "Onboarding wizard first screen"
+        desc = ('The onboarding wizard shows a "Welcome" screen first, '
+                "then asks for consent")
+        self.assertIsNone(self.main.extract_dynamic_print_message(title, desc))
+        self.assertIsNone(self.main.match_dynamic_print_task(title, desc, "Python (Flask)"))
+        # একই ধরনের descriptive বাক্য (screen/page/dialog/modal/toast + বাংলা
+        # স্ক্রিন/পেজ/ফর্ম) — স্পষ্ট প্রিন্ট-নির্দেশ না থাকলে সবগুলোই None
+        ui_desc_cases = (
+            ("setup toast", 'The settings page shows a "Saved!" toast after submit', "python"),
+            ("delete confirm", 'A modal dialog shows "Are you sure?" before deleting the row', "Node.js"),
+            ("wizard bn", "সাবমিট করলে ফর্মে 'ধন্যবাদ' স্ক্রিন দেখাবে", "php"),
+            ("page bn", "লগইন পেজে 'ব্যবহারকারী নেই' message দেখাবে", "javascript"),
+        )
+        for t, d, stack in ui_desc_cases:
+            with self.subTest(title=t):
+                self.assertIsNone(
+                    self.main.match_dynamic_print_task(t, d, stack),
+                    f"UI description unexpectedly matched: {d!r}",
+                )
+
+    def test_ui_words_with_explicit_print_instruction_still_work(self):
+        # গেট যেন over-block না করে — লিটারেল print/লেখা-আসবে নির্দেশ থাকলে
+        # screen/wizard/form-জাতীয় শব্দ থাকলেও বার্তা উঠে আসবে
+        self.assertEqual(
+            self.main.extract_dynamic_print_message("t", 'রান করলে স্ক্রিনে "হ্যালো" লেখা আসবে'),
+            "হ্যালো",
+        )
+        self.assertEqual(
+            self.main.extract_dynamic_print_message(
+                "t", 'print "ok" in the terminal when the setup wizard starts run'
+            ),
+            "ok",
+        )
+        self.assertEqual(
+            self.main.extract_dynamic_print_message("t", "চালালে কনসোলে 'মন্তব্য জমা হয়েছে' লেখা আসবে"),
+            "মন্তব্য জমা হয়েছে",
+        )
+
+    def test_ui_gate_helper_semantics(self):
+        gate = self.main._dynamic_print_looks_like_ui_description
+        self.assertTrue(gate('The onboarding wizard shows a "Welcome" screen first'))
+        self.assertTrue(gate("স্ক্রিনে বোতাম দেখাবে"))
+        self.assertFalse(gate('The script prints "hi" when run'))
+        self.assertFalse(gate("রান করলে স্ক্রিনে 'হ্যালো' লেখা আসবে"))  # লিটারেল নির্দেশ আছে
+        self.assertFalse(gate(""))
+
+    # ------------------------------------------------------------------
     # 2. স্ট্যাক দেখে ভাষা-নির্বাচন ও সঠিক সিনট্যাক্সে সম্পূর্ণ কোড
     # ------------------------------------------------------------------
     LANG_CASES = (
@@ -138,6 +190,24 @@ class DynamicPrintKbTests(unittest.TestCase):
         ("Ruby", "puts 'hi'"),
         ("Kotlin", "fun main()"),
     )
+
+    def test_language_detection_kotlin_before_android_trigger(self):
+        # Regression (Bug 1): 'android' java-প্যাটার্নের ট্রিগার ছিল এবং java-চেক
+        # kotlin-চেকের আগে বসানো থাকায় "Kotlin for Android" → 'java' রিটার্ন করত।
+        detect = self.main._detect_dynamic_print_language
+        self.assertEqual(detect("Kotlin for Android"), "kotlin")
+        self.assertEqual(detect("Android Studio + Kotlin"), "kotlin")
+        self.assertEqual(detect("Java 17 + Spring Boot"), "java")
+        # 'android' এখন java-র নির্ভরযোগ্য সংকেত নয় — শুধু "Android" থাকলে
+        # কিছু ধরা হবে না, AI ফলব্যাক (ভুল ভাষা ধরে নেওয়া চেয়ে নিরাপদ)
+        self.assertEqual(detect("Android"), "")
+        # end-to-end: kotlin স্ট্যাকে kotlin-ই জেনারেট হয়, java-র সিনট্যাক্স নয়
+        res = self.main.match_dynamic_print_task(
+            "t", 'প্রিন্ট করলে "শুভযাত্রা" লেখা আসবে', "Kotlin for Android")
+        self.assertIsNotNone(res)
+        self.assertIn("fun main()", res[1])
+        self.assertIn("শুভযাত্রা", res[1])
+        self.assertNotIn("System.out.println", res[1])
 
     def test_generates_runnable_code_per_language(self):
         for stack, expected in self.LANG_CASES:
@@ -263,6 +333,17 @@ class DynamicPrintKbTests(unittest.TestCase):
         self.assertNotIn("no_api_blocked", str(result.get("source")))
         ask_ai.assert_not_awaited()
         engine.execute_async.assert_not_awaited()
+
+    def test_ui_wizard_task_goes_to_ai_not_dynamic_print(self):
+        # Regression (Bug 2, orchestrator level): আগের আচরণে এই টাস্কটা AI কলই
+        # হতো না — print("Welcome") জেনারেট করে 'done' মার্ক হয়ে যেত। এখন UI-
+        # বর্ণনা গেটে dynamic এন্ট্রি None দিবে, তাই টাস্ক স্বাভাবিক AI রুটে যাবে।
+        result, ask_ai, _engine, _pid = self._run_task(
+            USER_ID, "Python (Flask)", "Onboarding wizard first screen",
+            'The onboarding wizard shows a "Welcome" screen first, then asks for consent')
+        self.assertNotEqual(result.get("source"), "knowledge_base:dynamic_print")
+        self.assertEqual(result["source"], "ai")
+        ask_ai.assert_awaited()
 
     def test_no_api_mode_still_blocks_nondeterministic_tasks(self):
         # রিগ্রেশন গার্ড: যা dynamic KB-তে মিলবে না, সেটা আগের মতোই no-api-তে আটকাবে

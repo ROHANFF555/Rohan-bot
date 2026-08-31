@@ -11769,13 +11769,54 @@ _DYNAMIC_PRINT_PATHISH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# স্ট্যাক-স্ট্রিং → ভাষা। ক্রম গুরুত্বপূর্ণ: "javascript" "java"র আগে, "c++"/"c#" "c"র আগে।
+# ---- Negative-context গেট: UI/ফিচার-বর্ণনা ≠ লিটারেল প্রিন্ট-নির্দেশ --------------
+# 'The onboarding wizard shows a "Welcome" screen first' — এধরনের বাক্যে "shows" +
+# কোটেশন থাকায় এক্সট্র্যাক্টর ভুলে "Welcome" কে প্রিন্ট-বার্তা ধরে print("Welcome")
+# জেনারেট করত, আর টাস্ক AI ছাড়াই 'done' মার্ক হয়ে ভুল কোডে আটকে যেত। অথচ বাক্যটা
+# UI-তে কিছু 'দেখানো'র বর্ণনা — কনসোলে লিটারেল প্রিন্টের নির্দেশ না।
+_DYNAMIC_PRINT_UI_WORDS_RE = re.compile(
+    r"\bscreens?\b|\bpages?\b|\bwizards?\b|\bdialogs?\b|\bmodal(?:s| dialogs)?\b|\btoasts?\b|\bui\b|\bforms?\b|"
+    r"স্ক্রিন|স্ক্রিন|পেজ|পৃষ্ঠা|ফর্ম|ফরম|উইজার্ড|ডায়ালগ|ডায়ালাগ|মোডাল|টোস্ট",
+    re.IGNORECASE,
+)
+# স্পষ্ট "কনসোল/আউটপুটে ছাপো" নির্দেশ — এটা থাকলে UI-শব্দ সত্ত্বেও বার্তা-বের করা বৈধ
+# (BN/EN মাঝের-অংশ প্যাটার্নের টার্মিনাল-ভার্বগুলোও এখানেই, তাই গেট সঠিক ম্যাচ কখনো
+#  অকেজো করে না)। "দেখাবে" একা এই তালিকায় নেই — সেটাই বাস্তবে UI-বর্ণনার প্রধান ক্রিয়া।
+_DYNAMIC_PRINT_LITERAL_PRINT_RE = re.compile(
+    r"\bprint(?:s|ed|ing)?\b|\bprintf\b|\bconsole\.log\b|\becho(?:es|ed)?\b|\bstdout\b|\bstderr\b|"
+    r"প্রিন্ট|প্রিন্ট|কনসোলে|স্টডাউট|লেখা\s+আসবে|লেখা\s+দেখ|লেখা\s+উঠবে|লেখা\s+প্রিন্ট|প্রিন্ট\s+হবে|প্রিন্ট\s+করা\s+হবে|দেখানো\s+হবে",
+    re.IGNORECASE,
+)
+
+
+def _dynamic_print_looks_like_ui_description(text: str) -> bool:
+    """টেক্সটটা কি UI/ফিচার-বর্ণনা, লিটারেল প্রিন্ট-টাস্ক না?
+
+    UI/ফিচার-বর্ণনাসূচক শব্দ (screen/page/wizard/dialog/modal/toast/form/UI +
+    বাংলা স্ক্রিন/পেজ/ফর্ম...) থাকলে এবং বাক্যে স্পষ্ট কনসোল-প্রিন্ট নির্দেশ
+    (print/echo/প্রিন্ট/লেখা আসবে/দেখানো হবে) না থাকলে → True। True হলে dynamic
+    এন্ট্রি পুরোপুরি প্রযোজ্য নয় — কোটেশন-শাখা আর ইংরেজি 'shows ... '-ধরনের
+    মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None (স্বাভাবিক AI ফ্লো)। বাংলা মাঝের-অংশ
+    প্যাটার্ন স্বয়ংক্রিয়ভাবে নিরাপদ, কারণ ওর টার্মিনাল-ভার্বগুলো লিটারেল তালিকায়ই আছে।
+    সন্দেহে AI-তে পাঠানো (একটু বেশি খরচ) ভুল কোড দিয়ে টাস্ক 'done' মার্ক করে
+    অদৃশ্য করে দেওয়ার চেয়ে ঢের নিরাপদ — তাই গেট conservative দিকেই ঝুঁকে।
+    """
+    if not text or not _DYNAMIC_PRINT_UI_WORDS_RE.search(text):
+        return False
+    return not _DYNAMIC_PRINT_LITERAL_PRINT_RE.search(text)
+
+
+# স্ট্যাক-স্ট্রিং → ভাষা। ক্রম গুরুত্বপূর্ণ: "javascript" "java"র আগে, "c++"/"c#" "c"র আগে,
+# আর "kotlin" "java"র আগে — Android স্ট্যাক সহ "Kotlin for Android" ভুলে 'java' ধরে
+# ফেলছিল (regression fix), তাই kotlin-চেক আগে এবং 'android' শব্দটা java-প্যাটার্ন থেকে
+# সরানো হয়েছে (অ্যান্ড্রয়েড-প্রজেক্ট এখন প্রায় সবটাই Kotlin-ভিত্তিক — 'android'
+# একা java-র নির্ভরযোগ্য সংকেত নয়; শুধু "Android" থাকলে কিছু না ধরে AI ফলব্যাকই নিরাপদ)।
 _DYNAMIC_PRINT_LANG_PATTERNS = (
     (re.compile(r"javascript|typescript|\bjs\b|\bnode(?:\.js)?\b|nodejs|react|express|nestjs|\bdeno\b", re.IGNORECASE), "javascript"),
     (re.compile(r"c\+\+|\bcpp\b|\bcxx\b", re.IGNORECASE), "cpp"),
     (re.compile(r"c#|csharp|\.net\b|dotnet", re.IGNORECASE), "csharp"),
-    (re.compile(r"\bjava\b|spring(?:boot)?|android", re.IGNORECASE), "java"),
     (re.compile(r"\bkotlin\b", re.IGNORECASE), "kotlin"),
+    (re.compile(r"\bjava\b|spring(?:boot)?", re.IGNORECASE), "java"),
     (re.compile(r"\bpython\b|\bpy\b|django|flask|fastapi|streamlit", re.IGNORECASE), "python"),
     (re.compile(r"\bphp\b|laravel|wordpress|\bmagento\b", re.IGNORECASE), "php"),
     (re.compile(r"\bbash\b|\bshell\b|\bzsh\b|\bsh\b|shell\s*script", re.IGNORECASE), "bash"),
@@ -11825,10 +11866,17 @@ def extract_dynamic_print_message(title: str, description: str) -> Optional[str]
     ক্রম: ১) কোটেশনের ভেতরের টেক্সট (প্রিন্ট/রান-প্রসঙ্গ থাকা অবস্থায়),
     ২) বাংলা "করলে ... লেখা আসবে/দেখাবে/প্রিন্ট হবে" প্যাটার্নের মাঝের অংশ,
     ৩) ইংরেজি "prints/outputs/shows ... when/if run" প্যাটার্নের মাঝের অংশ।
-    কোনোটিতেই মিলল না → None (কলার তখন স্বাভাবিক AI ফ্লোতে যায়)।
+    কোনোটিতেই মিলল না → None (কলার তখন স্বাভাবিক AI ফ্লোতে যায়)। এর আগেই
+    negative-context গেট: টেক্সট UI/ফিচার-বর্ণনাসূল্য (screen/page/wizard/dialog...
+    শব্দ আছে, অথচ লিটারেল print/প্রিন্ট-নির্দেশ নেই) হলে quote-শাখা ও ইংরেজি
+    'shows ...'-মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None — '...shows a "Welcome"
+    screen first...' এধরনের বর্ণনাকে প্রিন্ট-টাস্ক বলে ভুল 'done' মার্ক হবে না।
     """
     text = f"{(title or '').strip()}\n{(description or '').strip()}".strip()
     if not text:
+        return None
+    # ০) negative context — UI/ফিচার-বর্ণনা প্রিন্ট-টাস্ক নয় (conservative: AI ফলব্যাক)
+    if _dynamic_print_looks_like_ui_description(text):
         return None
     # ১) কোটেশন — কেবল প্রিন্ট/রান-জাতীয় প্রসঙ্গেই বিশ্বস্ত
     if _DYNAMIC_PRINT_CONTEXT_RE.search(text):
