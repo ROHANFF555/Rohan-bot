@@ -12,9 +12,11 @@ main.py একক-file application হওয়ায় test-টি সেট�
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -63,6 +65,64 @@ class NoApiCodingGuardTests(unittest.TestCase):
         plan = asyncio.run(run())
         self.assertTrue(plan["no_api_blocked"])
         self.assertEqual(plan["tasks"][0]["title"], "No API Mode চালু আছে")
+
+    def test_codeproject_plan_does_not_call_ai_in_no_api_mode(self):
+        # /codeproject-এর প্ল্যানার (coding_analyze_and_plan) — /codeplan-এর মতোই
+        # No API Mode-এ ask_ai কল করার আগেই deterministic/blocked ফলাফলে থামবে।
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(
+                    "একটি অচেনা inventory analytics app বানাও", USER_ID
+                )
+                ask_ai.assert_not_awaited()
+                return plan
+
+        plan = asyncio.run(run())
+        self.assertTrue(plan["no_api_blocked"])
+        self.assertEqual(plan["stack"], "unknown")
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(plan["tasks"][0]["title"], "No API Mode চালু আছে")
+
+    def test_codeproject_dynamic_print_resolves_without_ai(self):
+        # এক্স্যাক্ট repro: "রান করলে ... লেখা আসবে" ধরনের এক-লাইনের রিকোয়েস্ট No API
+        # Mode-এও /codeproject প্ল্যানার + process_next_code_task() দিয়ে AI ছাড়াই
+        # একটাই সঠিক ধাপে resolve হবে — কোডে "সফল হয়েছে" প্রিন্ট থাকবে।
+        raw_request = "একটি কোড লেখ যেটা রান করলে সফল হয়েছে লেখা আসবে"
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(raw_request, USER_ID)
+                ask_ai.assert_not_awaited()
+                project_id = self.main.create_code_project(
+                    USER_ID, plan["project_name"], raw_request, plan["stack"], plan["tasks"]
+                )
+                project = self.main.get_project(project_id, owner_id=USER_ID)
+                result = await self.main.process_next_code_task(project)
+                return plan, project_id, result, ask_ai
+
+        plan, project_id, result, ask_ai = asyncio.run(run())
+        self.assertFalse(plan.get("no_api_blocked"))
+        self.assertTrue(plan.get("deterministic"))
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(result["status"], "done")
+        self.assertTrue(result["source"].startswith("knowledge_base:"))
+        ask_ai.assert_not_awaited()
+        # জেনারেট হওয়া কোডে বার্তাটা সত্যিই আছে
+        self.assertIn("সফল হয়েছে", result["code"])
+        # ডাটাবেসেও done হিসেবে সেভ হয়েছে
+        saved = self.main.get_project_tasks(project_id)
+        self.assertEqual(saved[0]["status"], "done")
+        self.assertTrue(saved[0]["source"].startswith("knowledge_base:"))
+        # ধরা পড়া ভাষার সিনট্যাক্সে কোডটা সত্যিই বার্তাটা প্রিন্ট করে
+        lang = self.main._detect_dynamic_print_language(plan["stack"])
+        self.assertTrue(lang)
+        if lang == "python":
+            ast.parse(result["code"])
+            run_result = subprocess.run(
+                [sys.executable, "-c", result["code"]], capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(run_result.returncode, 0, run_result.stderr[:300])
+            self.assertIn("সফল হয়েছে", run_result.stdout)
 
     def test_legacy_task_fallback_does_not_call_ai(self):
         project_id = self.main.create_code_project(

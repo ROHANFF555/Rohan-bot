@@ -275,6 +275,32 @@ class DynamicPrintKbTests(unittest.TestCase):
         kt = self.main._build_dynamic_print_code("kotlin", "cost $5")
         self.assertIn("\\$", kt)
 
+    def test_dynamic_print_request_helper_detects_language(self):
+        # _match_dynamic_print_request — রিকোয়েস্টে ভাষা থাকলে সেটাই, না থাকলে ডিফল্ট
+        res = self.main._match_dynamic_print_request("java তে কোড লেখ যেটা রান করলে 'হাই' লেখা আসবে")
+        self.assertIsNotNone(res)
+        label, code, language = res
+        self.assertEqual(label, self.main.DYNAMIC_PRINT_KB_LABEL)
+        self.assertEqual(language, "java")
+        self.assertIn('System.out.println("হাই")', code)
+        # ভাষা উল্লেখ না থাকলে ডিফল্ট (python)
+        res = self.main._match_dynamic_print_request("একটি কোড লেখ যেটা রান করলে সফল হয়েছে লেখা আসবে")
+        self.assertIsNotNone(res)
+        self.assertEqual(res[2], "python")
+        self.assertIn('print("সফল হয়েছে")', res[1])
+        # প্রিন্ট-টাস্ক নয় এমন সাধারণ রিকোয়েস্ট → None (blocked/AI ফলব্যাক)
+        self.assertIsNone(self.main._match_dynamic_print_request("ইনভয়েস সিস্টেম আর স্ট্রাইপ পেমেন্ট বানাও"))
+
+    def test_unsupported_language_request_not_forced_to_default(self):
+        # রিকোয়েস্টে Rust/Swift-জাতীয় ভাষার নাম স্পষ্ট থাকলে dynamic KB জোর করে
+        # ডিফল্ট python-এ কোড বসাবে না — None (ভুল সিনট্যাক্সে 'done' হওয়া বন্ধ)।
+        for req in (
+            "Rust এ কোড লেখ যেটা রান করলে 'hi' লেখা আসবে",
+            "swift program that prints ok when run",
+        ):
+            with self.subTest(req=req):
+                self.assertIsNone(self.main._match_dynamic_print_request(req))
+
     def test_unknown_stack_or_message_falls_back_with_none(self):
         # বার্তা মিলল কিন্তু ভাষা চেনা নয় → None (AI হ্যান্ডেল করবে)
         self.assertIsNone(self.main.match_dynamic_print_task("t", 'print "hi" when run', "Rust (wasm)"))
@@ -352,6 +378,51 @@ class DynamicPrintKbTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["source"], "no_api_blocked")
         ask_ai.assert_not_awaited()
+
+    def test_multistep_project_only_stamps_first_task(self):
+        # Gap-fix regression: প্ল্যান রিকোয়েস্টটাকে generic ধাপে ভেঙে দিলে (যেমন
+        # "Initialize Project Folder") কোনো ধাপের নিজের title/description-এই আসল
+        # "লেখা আসবে" বাক্যটা থাকে না — project["description"]-এ থাকা আসল রিকোয়েস্ট
+        # শুধু প্রথম pending ধাপে resolve হবে; দ্বিতীয় ধাপে একই প্রিন্ট-কোড
+        # stamp করে চুপচাপ 'done' মার্ক করা হবে না (সে স্বাভাবিক no-api-blocked পাথে যাবে)।
+        project_id = self.main.create_code_project(
+            USER_ID_NOAPI,
+            "মাল্টিস্টেপ ডেমো",
+            "রান করলে 'সফল' লেখা আসবে",
+            "python",
+            [
+                {"title": "Initialize Project Folder", "description": "প্রজেক্ট ফোল্ডার আর এন্ট্রি ফাইল তৈরি করো"},
+                {"title": "Implement Success Message Function", "description": "সাকসেস মেসেজ ফাংশন ইমপ্লিমেন্ট করো"},
+            ],
+        )
+        project = self.main.get_project(project_id, owner_id=USER_ID_NOAPI)
+        fake_engine = MagicMock()
+        fake_engine.execute_async = AsyncMock(return_value={"strategy": "ai", "stage": "ai"})
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock(return_value="# ai\n")) as ask_ai, \
+                 patch.object(self.main, "decision_engine_service", fake_engine):
+                first = await self.main.process_next_code_task(project)
+                second = await self.main.process_next_code_task(project)
+            return first, second, ask_ai
+
+        first, second, ask_ai = asyncio.run(run())
+        # প্রথম ধাপ: project-level fallback দিয়ে deterministicভাবে resolve
+        self.assertEqual(first["status"], "done")
+        self.assertEqual(first["source"], "knowledge_base:dynamic_print")
+        self.assertIn('print("সফল")', first["code"])
+        # দ্বিতীয় ধাপ: নিজের title/description-এ প্যাটার্ন নেই — প্রথম ধাপ done হয়ে
+        # যাওয়ায় project-level fallback আর লাগবে না; no-api-blocked পাথে পড়বে
+        self.assertNotEqual(second.get("source"), "knowledge_base:dynamic_print")
+        self.assertEqual(second["source"], "no_api_blocked")
+        self.assertEqual(second["status"], "failed")
+        self.assertNotIn('print("সফল")', second.get("code", ""))
+        ask_ai.assert_not_awaited()
+        # ডাটাবেসেও শুধু প্রথম ধাপ done, দ্বিতীয় ধাপ failed
+        saved = self.main.get_project_tasks(project_id)
+        self.assertEqual(saved[0]["status"], "done")
+        self.assertEqual(saved[1]["status"], "failed")
+        self.assertNotEqual(saved[1]["source"], "knowledge_base:dynamic_print")
 
     # ------------------------------------------------------------------
     # 4. ফিক্সড অ্যালগরিদম টেমপ্লেট (CODE_KNOWLEDGE_BASE-এ নতুন এন্ট্রি)
