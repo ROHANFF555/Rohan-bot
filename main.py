@@ -4673,6 +4673,11 @@ class DecisionRepository:
 # দিয়ে সেগুলো candidate তালিকা থেকে সম্পূর্ণ বাদ যায়।
 CODING_EXCLUDED_BRAIN_CATEGORIES: List[str] = ["bot_info", "greeting"]
 
+# decision dict-এর সাথে সাজানো candidate তালিকার কয়টা শীর্ষ এন্ট্রি সংযোজিত থাকবে —
+# coding-orchestrator এগুলো থেকে "প্রাসঙ্গিক নিয়ম/গাইডলাইন" (non-code entries) বাছাই
+# করে AI প্রম্পটে যোগ করে (সব candidate সংযোজন করলে decision dict অপ্রয়োজনে বড় হত)।
+DECISION_CANDIDATES_KEPT = 6
+
 
 def _normalize_exclude_categories(exclude_categories: Optional[Sequence[str]] = None) -> set:
     try:
@@ -4862,7 +4867,11 @@ class DecisionEngine(EngineInterface):
         strategy="direct" if best["stage"] in ("knowledge","pattern","documentation","template") and best["confidence"]>=0.72 and match_quality_ok else "ai"
         decision={"request_hash":key,"stage":best["stage"],"strategy":strategy,"provider_hint":provider_hint,
                   "confidence":round(float(best["confidence"]),3),"score":best["score"],"candidate_count":len(candidates),
-                  "context":ctx,"payload":best["payload"],"fallback":"ai","retry_max":AI_KEY_RETRY_MAX_ATTEMPTS,"cached":False}
+                  "context":ctx,"payload":best["payload"],"fallback":"ai","retry_max":AI_KEY_RETRY_MAX_ATTEMPTS,"cached":False,
+                  # শীর্ষ candidate গুলো (সাজানো ক্রমে) সংযোজন — coding-orchestrator যেন
+                  # direct-এ reject হওয়া/নিচের প্রাসঙ্গিক knowledge/pattern/template এন্ট্রি
+                  # গুলো AI প্রম্পটে "নিয়ম/গাইডলাইন" হিসেবে ব্যবহার করতে পারে।
+                  "candidates":[dict(c) for c in candidates[:DECISION_CANDIDATES_KEPT]]}
         saved=self.repo.save(BrainDecision(user_id=user_id,request_hash=key,stage=decision["stage"],strategy=strategy,
             provider_hint=provider_hint,confidence=decision["confidence"],score=decision["score"],
             payload=json.dumps(decision["payload"],ensure_ascii=False,default=str)))
@@ -11579,6 +11588,60 @@ CODE_KNOWLEDGE_BASE = [
      "    salt = bytes.fromhex(salt_hex)\n"
      "    check = hashlib.pbkdf2_hmac(\"sha256\", password.encode(), salt, 100_000)\n"
      "    return check.hex() == digest_hex\n"),
+    # ---- সুপরিচিত, সসীম অ্যালগরিদম প্যাটার্ন — এই ক্লাসিক একক-ধাপের টাস্কগুলোর জন্য
+    #      AI কল করা অবান্তর; নির্দিষ্ট, যাচাইযোগ্য টেমপ্লেট নিচে দেওয়া ----
+    (("fizzbuzz", "fizz buzz", "ফিজবাজ", "ফিজ বাজ"), "fizzbuzz",
+     "def fizzbuzz(n: int) -> None:\n"
+     "    for i in range(1, n + 1):\n"
+     "        if i % 3 == 0 and i % 5 == 0:\n"
+     "            print(\"FizzBuzz\")\n"
+     "        elif i % 3 == 0:\n"
+     "            print(\"Fizz\")\n"
+     "        elif i % 5 == 0:\n"
+     "            print(\"Buzz\")\n"
+     "        else:\n"
+     "            print(i)\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    fizzbuzz(20)\n"),
+    (("prime number", "prime check", "is prime", "প্রাইম", "মৌলিক সংখ্যা"), "prime_check",
+     "def is_prime(n: int) -> bool:\n"
+     "    \"\"\"Trial division — O(√n)।\"\"\"\n"
+     "    if n < 2:\n"
+     "        return False\n"
+     "    if n % 2 == 0:\n"
+     "        return n == 2\n"
+     "    d = 3\n"
+     "    while d * d <= n:\n"
+     "        if n % d == 0:\n"
+     "            return False\n"
+     "        d += 2\n"
+     "    return True\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print([n for n in range(2, 50) if is_prime(n)])\n"),
+    (("factorial", "ফ্যাক্টোরিয়াল"), "factorial",
+     "def factorial(n: int) -> int:\n"
+     "    if n < 0:\n"
+     "        raise ValueError(\"ঋণাত্মক সংখ্যার factorial নেই\")\n"
+     "    result = 1\n"
+     "    for i in range(2, n + 1):\n"
+     "        result *= i\n"
+     "    return result\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(factorial(5))  # 120\n"),
+    (("fibonacci", "ফিবোনাচি", "ফিবোনাচ্চি"), "fibonacci",
+     "def fib_sequence(n: int) -> list:\n"
+     "    a, b, out = 0, 1, []\n"
+     "    for _ in range(n):\n"
+     "        out.append(a)\n"
+     "        a, b = b, a + b\n"
+     "    return out\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(fib_sequence(10))\n"),
+    (("string reverse", "reverse a string", "reverse string", "স্ট্রিং রিভার্স", "স্ট্রিং উল্টো"), "string_reverse",
+     "def reverse_string(text: str) -> str:\n"
+     "    return text[::-1]\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(reverse_string(\"আমার সোনার বাংলা\"))\n"),
 ]
 
 # --------------------------------------------------------------------------
@@ -11639,6 +11702,310 @@ def match_knowledge_base(title: str, description: str, project_name: str = "", p
         "{project_desc}", project_desc or ""
     )
     return label, code
+
+
+# --------------------------------------------------------------------------
+# Dynamic KB entry: `dynamic_print_task`
+# এটা CODE_KNOWLEDGE_BASE-এর মতো স্থির-কীওয়ার্ড টেবিল নয় — একটা ডাইনামিক এন্ট্রি।
+# টাস্কের মূল কাজ যদি "প্রোগ্রাম রান করলে একটা নির্দিষ্ট বার্তা প্রিন্ট হবে" ধরনের
+# deterministic কাজ হয়, তাহলে title+description থেকে regex দিয়ে বার্তাটা বের করে,
+# project['stack']-এ লেখা ভাষার সঠিক সিনট্যাক্সে সম্পূর্ণ চালানোর-যোগ্য কোড বানিয়ে
+# দেয় — AI কল ছাড়াই। বার্তা-বের করার অগ্রাধিকার:
+#   ১) কোটেশনের ভেতরের টেক্সট (শুধু প্রিন্ট/রান-প্রসঙ্গ থাকলেই গ্রহণ — নইলে
+#      "ডিজাইনে 'login' পেজ" এধরনের বিচ্ছিন্ন কোটেড শব্দ ভুলে ধরা পড়ত);
+#   ২) না পেলে বাংলা "করলে/চালালে ... লেখা আসবে/দেখাবে/প্রিন্ট হবে" প্যাটার্নের মাঝের অংশ;
+#   ৩) তারপর ইংরেজি "prints/outputs/shows ... when/if run" প্যাটার্নের মাঝের অংশ।
+# কোনোটিতেই কিছু না মিললে (বা স্ট্যাকের ভাষা চেনা না হলে) None — স্বাভাবিক AI ফ্লো
+# চালু থাকে, জোর করে ভুল কিছু বসানো হয় না।
+# --------------------------------------------------------------------------
+
+DYNAMIC_PRINT_KB_LABEL = "dynamic_print"          # task.source → knowledge_base:dynamic_print
+DYNAMIC_PRINT_MSG_MAX_CHARS = 160                 # এর চেয়ে লম্বা বার্তা সহজ print টাস্কের নয় → অমিল ধরা হয়
+
+# কোটেশন-শাখাটা চালু হবে কিনা — টেক্সটে কোথাও print/run-জাতীয় ইঙ্গিত থাকতে হবে।
+_DYNAMIC_PRINT_CONTEXT_RE = re.compile(
+    r"প্রিন্ট|print|লেখা\s+আসবে|লেখা\s+দেখ|দেখানো\s+হবে|দেখাবে|আউটপুট|আউটপুট|স্ক্রিনে|কনসোলে|স্টডাউট|"
+    r"\bprint(?:s|ed|ing)?\b|\boutput(?:s)?\b|\bdisplay(?:s|ed|ing)?\b|\bshow(?:s|ed|ing)?\b|\becho(?:es|ed)?\b|"
+    r"\brun\b|\bruns\b|\brunning\b|\bexecut(?:e|es|ed|ing|ion)\b|when\s+(?:it\s+|the\s+\w+\s+)?run(?:s)?\b|"
+    r"\bif\s+run\b|রান\s*করলে|রান\s*করলে|রান\s*করলে|চালালে|চালালে|চালালে|ইনপুট\s+দিলে|"
+    r"console\.log|system\.out|\bprintf\b",
+    re.IGNORECASE,
+)
+
+# কোটেশন জোড়া (সোজা + বাঁকা + ফরাসি)। খোলা কোটের ঠিক আগে এবং বন্ধ কোটের ঠিক পরে
+# ফাংশন-কল/অ্যারে-স্টাইল প্রতীক থাকলে সেটি বাতিল — `print("hi")`-এর মতো কোড-স্নিপেট
+# থেকে ভুলভাবে "hi" তুলে নেওয়া যাবে না। single-quote জোড়ায় আবার শব্দের সাথে লেগে থাকা
+# অ্যাপোস্ট্রফি ("user's script's") এড়াতে দুই পাশেই word-boundary না-লাগার শর্ত।
+_DYNAMIC_PRINT_QUOTED_RES = (
+    re.compile(r"(?<![(=\[{])\"([^\"\n]{1,200})\"(?![)\]}])"),
+    re.compile(r"[\u201c]([^\"\u201d\u201c\n]{1,200})[\u201d]"),
+    re.compile(r"(?<![\w(=\[{])'([^'\n]{1,200})'(?![\w)\]}])"),
+    re.compile(r"(?<![\w])[\u2018]([^'\u2018\u2019\n]{1,200})[\u2019](?![\w])"),
+    re.compile(r"\u00ab([^\u00bb\n]{1,200})\u00bb"),
+)
+
+# বাংলা: "... করলে/চালালে <বার্তা> লেখা আসবে/লেখা দেখাবে/প্রিন্ট হবে/দেখানো হবে"
+_DYNAMIC_PRINT_BN_RE = re.compile(
+    r"(?:চালালে|চালালে|রান\s*করলে|রান\s*করলে|করলে|করলে)\s+"
+    r"[\"'`\u201c\u2018]?\s*([^\"'`\n]{1,200}?)\s*[\"'`\u201d\u2019]?\s+"
+    r"(?:লেখা\s+আসবে|লেখা\s+দেখাবে|লেখা\s+দেখাবে|লেখা\s+উঠবে|লেখা\s+প্রিন্ট\s+হবে|প্রিন্ট\s+হবে|প্রিন্ট\s+করা\s+হবে|দেখানো\s+হবে)"
+)
+
+# ইংরেজি: "... prints/outputs/shows <বার্তা> when/if (it is) run/executed"
+# capture-এ কোট চরিত্র থাকবে না — `print("hi")`-এর মতো কোড-কল থেকে গ্রাস করবে না;
+# কোটেশনযুক্ত বার্তা আগেই quoted-শাখা ধরে ফেলে।
+_DYNAMIC_PRINT_EN_RE = re.compile(
+    r"\b(?:prints?|outputs?|displays?|shows?|echo(?:es|s)?)\b\s*[:\-]?\s*"
+    r"(?:the\s+|this\s+)?(?:text|string|message|sentence|line|word)?\s*"
+    r"[:\-]?\s*[\"'`\u201c\u2018]?\s*([^\"'`\n]{1,200}?)\s*[\"'`\u201d\u2019]?\s+"
+    r"\b(?:when|if)\b\s+(?:it\s+|the\s+\w+\s+|they\s+)?(?:is\s+|are\s+|gets?\s+)?(?:run|ran|executed|invoked|launched)\b",
+    re.IGNORECASE,
+)
+
+# কোটের ভেতরে ফাইল/পাথের মতো দেখতে লেখা প্রিন্ট-বার্তা না — উপেক্ষা।
+_DYNAMIC_PRINT_PATHISH_RE = re.compile(
+    r"^[\w./\\ -]{1,80}\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|java|kt|c|h|cpp|hpp|go|rs|rb|php|pl|swift|sh|bash|zsh|"
+    r"txt|md|json|ya?ml|toml|ini|cfg|html?|css|scss|sql|db|sqlite3?|csv|log|png|jpe?g|svg|ico|pdf|zip)$",
+    re.IGNORECASE,
+)
+
+# ---- Negative-context গেট: UI/ফিচার-বর্ণনা ≠ লিটারেল প্রিন্ট-নির্দেশ --------------
+# 'The onboarding wizard shows a "Welcome" screen first' — এধরনের বাক্যে "shows" +
+# কোটেশন থাকায় এক্সট্র্যাক্টর ভুলে "Welcome" কে প্রিন্ট-বার্তা ধরে print("Welcome")
+# জেনারেট করত, আর টাস্ক AI ছাড়াই 'done' মার্ক হয়ে ভুল কোডে আটকে যেত। অথচ বাক্যটা
+# UI-তে কিছু 'দেখানো'র বর্ণনা — কনসোলে লিটারেল প্রিন্টের নির্দেশ না।
+_DYNAMIC_PRINT_UI_WORDS_RE = re.compile(
+    r"\bscreens?\b|\bpages?\b|\bwizards?\b|\bdialogs?\b|\bmodal(?:s| dialogs)?\b|\btoasts?\b|\bui\b|\bforms?\b|"
+    r"স্ক্রিন|স্ক্রিন|পেজ|পৃষ্ঠা|ফর্ম|ফরম|উইজার্ড|ডায়ালগ|ডায়ালাগ|মোডাল|টোস্ট",
+    re.IGNORECASE,
+)
+# স্পষ্ট "কনসোল/আউটপুটে ছাপো" নির্দেশ — এটা থাকলে UI-শব্দ সত্ত্বেও বার্তা-বের করা বৈধ
+# (BN/EN মাঝের-অংশ প্যাটার্নের টার্মিনাল-ভার্বগুলোও এখানেই, তাই গেট সঠিক ম্যাচ কখনো
+#  অকেজো করে না)। "দেখাবে" একা এই তালিকায় নেই — সেটাই বাস্তবে UI-বর্ণনার প্রধান ক্রিয়া।
+_DYNAMIC_PRINT_LITERAL_PRINT_RE = re.compile(
+    r"\bprint(?:s|ed|ing)?\b|\bprintf\b|\bconsole\.log\b|\becho(?:es|ed)?\b|\bstdout\b|\bstderr\b|"
+    r"প্রিন্ট|প্রিন্ট|কনসোলে|স্টডাউট|লেখা\s+আসবে|লেখা\s+দেখ|লেখা\s+উঠবে|লেখা\s+প্রিন্ট|প্রিন্ট\s+হবে|প্রিন্ট\s+করা\s+হবে|দেখানো\s+হবে",
+    re.IGNORECASE,
+)
+
+
+def _dynamic_print_looks_like_ui_description(text: str) -> bool:
+    """টেক্সটটা কি UI/ফিচার-বর্ণনা, লিটারেল প্রিন্ট-টাস্ক না?
+
+    UI/ফিচার-বর্ণনাসূচক শব্দ (screen/page/wizard/dialog/modal/toast/form/UI +
+    বাংলা স্ক্রিন/পেজ/ফর্ম...) থাকলে এবং বাক্যে স্পষ্ট কনসোল-প্রিন্ট নির্দেশ
+    (print/echo/প্রিন্ট/লেখা আসবে/দেখানো হবে) না থাকলে → True। True হলে dynamic
+    এন্ট্রি পুরোপুরি প্রযোজ্য নয় — কোটেশন-শাখা আর ইংরেজি 'shows ... '-ধরনের
+    মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None (স্বাভাবিক AI ফ্লো)। বাংলা মাঝের-অংশ
+    প্যাটার্ন স্বয়ংক্রিয়ভাবে নিরাপদ, কারণ ওর টার্মিনাল-ভার্বগুলো লিটারেল তালিকায়ই আছে।
+    সন্দেহে AI-তে পাঠানো (একটু বেশি খরচ) ভুল কোড দিয়ে টাস্ক 'done' মার্ক করে
+    অদৃশ্য করে দেওয়ার চেয়ে ঢের নিরাপদ — তাই গেট conservative দিকেই ঝুঁকে।
+    """
+    if not text or not _DYNAMIC_PRINT_UI_WORDS_RE.search(text):
+        return False
+    return not _DYNAMIC_PRINT_LITERAL_PRINT_RE.search(text)
+
+
+# স্ট্যাক-স্ট্রিং → ভাষা। ক্রম গুরুত্বপূর্ণ: "javascript" "java"র আগে, "c++"/"c#" "c"র আগে,
+# আর "kotlin" "java"র আগে — Android স্ট্যাক সহ "Kotlin for Android" ভুলে 'java' ধরে
+# ফেলছিল (regression fix), তাই kotlin-চেক আগে এবং 'android' শব্দটা java-প্যাটার্ন থেকে
+# সরানো হয়েছে (অ্যান্ড্রয়েড-প্রজেক্ট এখন প্রায় সবটাই Kotlin-ভিত্তিক — 'android'
+# একা java-র নির্ভরযোগ্য সংকেত নয়; শুধু "Android" থাকলে কিছু না ধরে AI ফলব্যাকই নিরাপদ)।
+_DYNAMIC_PRINT_LANG_PATTERNS = (
+    (re.compile(r"javascript|typescript|\bjs\b|\bnode(?:\.js)?\b|nodejs|react|express|nestjs|\bdeno\b", re.IGNORECASE), "javascript"),
+    (re.compile(r"c\+\+|\bcpp\b|\bcxx\b", re.IGNORECASE), "cpp"),
+    (re.compile(r"c#|csharp|\.net\b|dotnet", re.IGNORECASE), "csharp"),
+    (re.compile(r"\bkotlin\b", re.IGNORECASE), "kotlin"),
+    (re.compile(r"\bjava\b|spring(?:boot)?", re.IGNORECASE), "java"),
+    (re.compile(r"\bpython\b|\bpy\b|django|flask|fastapi|streamlit", re.IGNORECASE), "python"),
+    (re.compile(r"\bphp\b|laravel|wordpress|\bmagento\b", re.IGNORECASE), "php"),
+    (re.compile(r"\bbash\b|\bshell\b|\bzsh\b|\bsh\b|shell\s*script", re.IGNORECASE), "bash"),
+    (re.compile(r"\bgo\b|golang", re.IGNORECASE), "go"),
+    (re.compile(r"\bruby\b|rails", re.IGNORECASE), "ruby"),
+    # একক "C" শেষে — বড় শব্দের অংশ হলে (\b না লাগলেও +,# থাকা অবস্থায়) বাদ।
+    (re.compile(r"(?<![\w+#])c(?![\w+#])", re.IGNORECASE), "c"),
+)
+
+
+def _detect_dynamic_print_language(stack: str) -> str:
+    """project['stack']-এর লেখা থেকে চেনা ভাষার কী-নাম; অচেনা হলে "" (তখন AI ফলব্যাক)।"""
+    s = (stack or "").strip()
+    if not s or "অজানা" in s or s.lower() in ("unknown", "none", "n/a"):
+        return ""
+    for pattern, language in _DYNAMIC_PRINT_LANG_PATTERNS:
+        try:
+            if pattern.search(s):
+                return language
+        except Exception:
+            continue
+    return ""
+
+
+def _clean_dynamic_print_message(raw: str) -> str:
+    """ক্যাপচার করা অংশ ছোট-লাইন, কোট-মুক্ত ও বৈধ-দৈর্ঘ্য না হলে খালি স্ট্রিং।"""
+    msg = "".join(ch for ch in (raw or "") if ord(ch) >= 32 or ch == " ")
+    msg = " ".join(msg.split())
+    msg = msg.strip().strip("\"'`\u201c\u201d\u2018\u2019\u00ab\u00bb")
+    msg = msg.lstrip(":>- \t").strip()
+    if len(msg) < 2 or len(msg) > DYNAMIC_PRINT_MSG_MAX_CHARS:
+        return ""
+    if not re.search(r"[\u0980-\u09ffA-Za-z0-9\u00c0-\u024fÀ-ſ]", msg):
+        return ""  # অন্তত এক অক্ষর/সংখ্যার শব্দ থাকতে হবে — "?!?" জাতীয় কিছু বার্তা নয়
+    if any(tok in msg for tok in ("()", "{", "}", ";", "<html", "</", "#include", "def ", "import ")):
+        return ""  # কোড-সদৃশ অংশ প্রিন্ট-বার্তা হতে পারে না
+    if _DYNAMIC_PRINT_PATHISH_RE.match(msg):
+        return ""  # "main.py", "index.js" — ফাইলনাম, বার্তা নয়
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", msg) and "_" in msg:
+        return ""  # user_id জাতীয় snake_case শনাক্তকারক, লিটারেল বার্তা নয়
+    return msg
+
+
+def extract_dynamic_print_message(title: str, description: str) -> Optional[str]:
+    """টাস্কের title+description থেকে প্রিন্ট করার বার্তা বের করে (dynamic KB অংশ ১)।
+
+    ক্রম: ১) কোটেশনের ভেতরের টেক্সট (প্রিন্ট/রান-প্রসঙ্গ থাকা অবস্থায়),
+    ২) বাংলা "করলে ... লেখা আসবে/দেখাবে/প্রিন্ট হবে" প্যাটার্নের মাঝের অংশ,
+    ৩) ইংরেজি "prints/outputs/shows ... when/if run" প্যাটার্নের মাঝের অংশ।
+    কোনোটিতেই মিলল না → None (কলার তখন স্বাভাবিক AI ফ্লোতে যায়)। এর আগেই
+    negative-context গেট: টেক্সট UI/ফিচার-বর্ণনাসূল্য (screen/page/wizard/dialog...
+    শব্দ আছে, অথচ লিটারেল print/প্রিন্ট-নির্দেশ নেই) হলে quote-শাখা ও ইংরেজি
+    'shows ...'-মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None — '...shows a "Welcome"
+    screen first...' এধরনের বর্ণনাকে প্রিন্ট-টাস্ক বলে ভুল 'done' মার্ক হবে না।
+    """
+    text = f"{(title or '').strip()}\n{(description or '').strip()}".strip()
+    if not text:
+        return None
+    # ০) negative context — UI/ফিচার-বর্ণনা প্রিন্ট-টাস্ক নয় (conservative: AI ফলব্যাক)
+    if _dynamic_print_looks_like_ui_description(text):
+        return None
+    # ১) কোটেশন — কেবল প্রিন্ট/রান-জাতীয় প্রসঙ্গেই বিশ্বস্ত
+    if _DYNAMIC_PRINT_CONTEXT_RE.search(text):
+        for quote_re in _DYNAMIC_PRINT_QUOTED_RES:
+            for m in quote_re.finditer(text):
+                candidate = _clean_dynamic_print_message(m.group(1))
+                if candidate:
+                    return candidate
+    # ২) বাংলা মাঝের-অংশ প্যাটার্ন (প্যাটার্নটাই প্রসঙ্গ বহন করে, আলাদা গেট দরকার নেই)
+    m = _DYNAMIC_PRINT_BN_RE.search(text)
+    if m:
+        candidate = _clean_dynamic_print_message(m.group(1))
+        if candidate:
+            return candidate
+    # ৩) ইংরেজি মাঝের-অংশ প্যাটার্ন
+    m = _DYNAMIC_PRINT_EN_RE.search(text)
+    if m:
+        candidate = _clean_dynamic_print_message(m.group(1))
+        if candidate:
+            return candidate
+    return None
+
+
+def _dynamic_print_dq_literal(message: str) -> str:
+    """C-পরিবার সিনট্যাক্সের (Python/JS/Java/C/C++/Go/C#/Kotlin) ডাবল-কোটেড স্ট্রিং লিটারেল।
+
+    JSON এস্কেপ এ-সব ভাষার লিটারেল-এস্কেপের উপসেট; JSON-এর অতিরিক্ত `\\/` এস্কেপ
+    কিছু ভাষায় (C/Go) অবৈধ, তাই বাদ। বাকি নিয়ন্ত্রণ-অক্ষর extract/clean ধাপেই মুছে
+    যায়, আর বেহাল্লাসহ বাকি non-ASCII কাঁচা UTF-8-এ রাখা হয় (সব ভাষাই UTF-8 সোর্স
+    চালায়)।
+    """
+    return json.dumps(message, ensure_ascii=False).replace("\\/", "/")
+
+
+def _dynamic_print_sq_literal(message: str, shell: bool = False) -> str:
+    """সিঙ্গেল-কোটেড লিটারেল (PHP/Ruby) — shell=True হলে bash-এর `'\''` কৌশল।"""
+    if shell:
+        return "'" + message.replace("'", "'\\''") + "'"
+    return "'" + message.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _build_dynamic_print_code(language: str, message: str) -> str:
+    """`message`-টাকে `language`-এর সঠিক সিনট্যাক্সে বসিয়ে সম্পূর্ণ চালানোর-যোগ্য কোড।
+
+    তালিকায় থাকা প্রতিটা ভাষার জন্য একটা করে ছোট, স্ব-নির্ভর (কোনো dependency
+    ছাড়াই চালানো যায়) entry-point ফাইল তৈরি হয়; তালিকায় না থাকা ভাষা → ""।
+    """
+    dq = _dynamic_print_dq_literal(message)
+    if language == "python":
+        return f"print({dq})\n"
+    if language == "javascript":
+        return f"console.log({dq});\n"
+    if language == "java":
+        return (
+            "public class Main {\n"
+            "    public static void main(String[] args) {\n"
+            f"        System.out.println({dq});\n"
+            "    }\n"
+            "}\n"
+        )
+    if language == "c":
+        return (
+            "#include <stdio.h>\n"
+            "\n"
+            "int main(void) {\n"
+            f"    printf(\"%s\\n\", {dq});\n"
+            "    return 0;\n"
+            "}\n"
+        )
+    if language == "cpp":
+        return (
+            "#include <iostream>\n"
+            "\n"
+            "int main() {\n"
+            f"    std::cout << {dq} << std::endl;\n"
+            "    return 0;\n"
+            "}\n"
+        )
+    if language == "php":
+        return f"<?php\n\necho {_dynamic_print_sq_literal(message)} . \"\\n\";\n"
+    if language == "bash":
+        return f"#!/usr/bin/env bash\n\nprintf '%s\\n' {_dynamic_print_sq_literal(message, shell=True)}\n"
+    if language == "go":
+        return (
+            "package main\n"
+            "\n"
+            "import \"fmt\"\n"
+            "\n"
+            "func main() {\n"
+            f"    fmt.Println({dq})\n"
+            "}\n"
+        )
+    if language == "csharp":
+        return (
+            "using System;\n"
+            "\n"
+            "class Program {\n"
+            "    static void Main() {\n"
+            f"        Console.WriteLine({dq});\n"
+            "    }\n"
+            "}\n"
+        )
+    if language == "ruby":
+        return f"puts {_dynamic_print_sq_literal(message)}\n"
+    if language == "kotlin":
+        # Kotlin-এ ডাবল-কোটেড স্ট্রিংয়ে $ টেমপ্লেট-ইন্টারপোলেশন শুরু করে — এস্কেপ বাধ্যতামূলক।
+        literal = dq.replace("$", "\\$")
+        return f"fun main() {{\n    println({literal})\n}}\n"
+    return ""
+
+
+def match_dynamic_print_task(title: str, description: str, stack: str = "") -> Optional[Tuple[str, str]]:
+    """`dynamic_print_task` ডাইনামিক KB এন্ট্রি — match_knowledge_base()-এর মতোই
+    (label, code) টাপল রিটার্ন করে (label = "dynamic_print"), যাতে process_next_code_task
+    একই ফর্ম্যাটে সরাসরি সেভ করতে পারে।
+
+    বার্তা না মিললে, বা project['stack']-এর ভাষা চেনা না হলে None রিটার্ন — কলার তখন
+    স্বাভাবিক AI ফ্লোতে ফলব্যাক করে (জোর করে ভুল সিনট্যাক্স বসানো হয় না)।
+    """
+    message = extract_dynamic_print_message(title, description)
+    if not message:
+        return None
+    language = _detect_dynamic_print_language(stack)
+    if not language:
+        return None
+    code = _build_dynamic_print_code(language, message)
+    if not code:
+        return None
+    return DYNAMIC_PRINT_KB_LABEL, code
 
 
 def _strip_code_fences(text: str) -> str:
@@ -13037,6 +13404,118 @@ def _looks_like_programming_stack(stack: str) -> bool:
         return True
 
 
+# greeting/bot-info FAQ-র ফিঙ্গারপ্রিন্ট — কোড-স্যানিটি চেক আর "প্রাসঙ্গিক নিয়ম"
+# সংগ্রহ দুটোতেই ব্যবহৃত হয় (একই লিস্ট দুই জায়গায় কপি না করার জন্য মডিউল-লেভেল)।
+_FAQ_REPLY_NEEDLES = (
+    "সব কমান্ডের তালিকা",
+    "/help অথবা /menu",
+    "/menu অথবা /help",
+    "আপনাকেও ধন্যবাদ",
+    "you're welcome",
+    "how can i help you",
+    "আমি আপনাকে কীভাবে সাহায্য",
+    "type your question or use /menu",
+    "লিখুন অথবা /menu",
+    "আসসালামু আলাইকুম / হ্যালো",
+)
+
+# Decision Engine-এর ম্যাচ "কোড" না হয়ে "নিয়ম/গাইডলাইন টেক্সট" হলে সেগুলো ফেলে না
+# দিয়ে AI প্রম্পটে যোগ হয় — কয়টা এন্ট্রি ও প্রতিটা কত লম্বা থাকবে সেটা এখানে সীমাবদ্ধ,
+# যাতে প্রম্পট অতিরিক্ত বড় না হয়ে যায়।
+CODING_RELEVANT_RULES_MAX = 3
+CODING_RULE_TEXT_MAX_CHARS = 400
+
+# "নিয়ম" হতে পারে এমন টেক্সটের উল্টো-চেক: এই মার্কারগুলো বাক্যের শুরুতে থাকলে
+# এন্ট্রিটা আসলে কোড-স্নিপেট (প্রম্পটে নিয়ম হিসেবে ঢোকানোর দরকার নেই — direct
+# রুটে সেটা কোড হিসেবেই ব্যবহারের চেষ্টা হয়)।
+_RULE_CODE_LINE_START_RE = re.compile(
+    r"^(def |class |async def |import |from \w[\w.]* import|const |let |var |package |using |func |"
+    r"public |private |protected |int main|#include|#\!|<\?php|@\w+\.\w+|#!\s*/)",
+)
+
+
+def _rule_text_looks_like_code(text: str) -> bool:
+    """রুল-প্রার্থী টেক্সট আসলে কোড-ব্লক কিনা (নিয়ম সংগ্রহের ফিল্টার)।
+
+    _coding_result_looks_like_code()-এর মার্কার-হিউরিস্টিক প্রোজার প্রতি বারবার ফেল
+    করত (বিরাম-চিহ্ন/বন্ধনী থাকলেই "কোড" বলে ফেলে দিত), তাই এখানে আলাদা কড়া চেক —
+    বহু-লাইন কোড-শুরুর-শব্দ বা ফেন্সড ব্লক দেখলেই শুধু "কোড" ধরা হয়।
+    """
+    try:
+        t = (text or "").strip()
+        if not t:
+            return False
+        if "```" in t:
+            return True
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+        code_lines = sum(1 for ln in lines if _RULE_CODE_LINE_START_RE.match(ln))
+        if code_lines >= 2:
+            return True
+        if code_lines == 1 and len(lines) <= 2:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _collect_relevant_brain_rules(decision: Dict[str, Any], stack: str = "") -> List[str]:
+    """Decision Engine-এর সাজানো candidate list থেকে শীর্ষ কয়েকটা প্রাসঙ্গিক
+    (কোড-না-হওয়া) knowledge/pattern/template/documentation এন্ট্রি "নিয়ম/গাইডলাইন"
+    হিসেবে তুলে আনে।
+
+    গ্যাপ-ফিক্স: আগে direct ম্যাচ কোড-চেকে ফেল করলে এন্ট্রিটা সম্পূর্ণ বাতিল হয়ে
+    যেত, AI-প্রম্পটে পৌঁছাত না। ইউজারের /addknowledge, /addpattern, /addtemplate
+    দিয়ে দেওয়া কোডিং-স্ট্যান্ডার্ড প্রায়শই টেক্সট-রুল, কোড নয় — এগুলো এখন
+    confidence অনুযায়ী সাজানো শীর্ষ CODING_RELEVANT_RULES_MAXটা এন্ট্রি হিসেবে
+    (প্রতিটা CODING_RULE_TEXT_MAX_CHARS ক্যারেক্টারে truncation করে) AI-এর
+    system_prompt-এ পৌঁছায়। কোনো এররে খালি লিস্ট রিটার্ন — প্রম্পট তখন আগের
+    মতোই তৈরি হবে (কোনো নতুন সেকশন যোগ হবে না)।
+    """
+    rules: List[str] = []
+    try:
+        candidates = decision.get("candidates") or []
+        if not candidates:
+            # ক্যান্ডিডেট-বিহীন (পুরোনো/মক করা decision) decision-এ অন্তত best
+            # এন্ট্রিটাই বিবেচনা করা হয় — ফেল-হওয়া ম্যাচটাই যে "নিয়ম" তাই।
+            candidates = [{
+                "stage": decision.get("stage"),
+                "confidence": decision.get("confidence"),
+                "payload": decision.get("payload"),
+            }]
+        ranked = [
+            c for c in candidates
+            if isinstance(c, dict) and c.get("stage") in ("knowledge", "pattern", "template", "documentation")
+        ]
+        ranked.sort(key=lambda c: (
+            float(c.get("confidence") or 0.0),
+            float(c.get("score") or 0.0),
+        ), reverse=True)
+        seen = set()
+        for cand in ranked:
+            if len(rules) >= CODING_RELEVANT_RULES_MAX:
+                break
+            content = _brain_payload_to_answer(cand.get("payload"))
+            if not content:
+                continue
+            content = _strip_code_fences(content)
+            content = " ".join(content.split())  # মাল্টি-লাইন এন্ট্রিকে এক লাইনের বুলেটে
+            if len(content) < 8:
+                continue
+            if any(n in content or n in content.lower() for n in _FAQ_REPLY_NEEDLES):
+                continue  # greeting/bot-info FAQ কখনো কোডিং-নিয়ম নয়
+            if _rule_text_looks_like_code(content):
+                continue  # কোড-সদৃশ এন্ট্রি নিয়ম হিসেবে ঢোকাবে না
+            content = content[:CODING_RULE_TEXT_MAX_CHARS].rstrip()
+            key = content.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(content)
+    except Exception as e:
+        logger.debug("Relevant-rule collection skipped: %s", e)
+    return rules
+
+
 def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
     """Safety net: greeting/bot-info FAQ যেন coding task-এর `code` ফিল্ডে সেভ না হয়।
 
@@ -13050,19 +13529,7 @@ def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
             return False
         if not _looks_like_programming_stack(stack):
             return True
-        faq_needles = (
-            "সব কমান্ডের তালিকা",
-            "/help অথবা /menu",
-            "/menu অথবা /help",
-            "আপনাকেও ধন্যবাদ",
-            "you're welcome",
-            "how can i help you",
-            "আমি আপনাকে কীভাবে সাহায্য",
-            "type your question or use /menu",
-            "লিখুন অথবা /menu",
-            "আসসালামু আলাইকুম / হ্যালো",
-        )
-        if any(n in blob or n in blob.lower() for n in faq_needles):
+        if any(n in blob or n in blob.lower() for n in _FAQ_REPLY_NEEDLES):
             return False
         markers = (
             "def ", "async def", "import ", "from ", "class ",
@@ -13114,8 +13581,29 @@ async def process_next_code_task(project: dict):
         brain_os_metrics["direct_answers"] += 1
         return task
 
+    # Dynamic KB entry `dynamic_print_task`: title+description থেকে regex দিয়ে প্রিন্ট
+    # বার্তা বের করে project['stack'] ভাষার সিনট্যাক্সে AI ছাড়াই সরাসরি কোড। কিছু
+    # না মিললে None — স্বাভাবিক ফ্লো চলবে। এটা is_no_api_mode() চেকের আগে বসা,
+    # তাই No API Mode চালু থাকলেও এই deterministic টাস্কগুলো ব্লক না হয়ে সমাধান হয়।
+    dynamic_match = None
+    try:
+        dynamic_match = match_dynamic_print_task(
+            task["title"], task["description"], project.get("stack", "")
+        )
+    except Exception as e:
+        logger.debug("dynamic_print_task check failed (AI fallback): %s", e)
+        dynamic_match = None
+    if dynamic_match:
+        label, code = dynamic_match
+        save_task_result(task["id"], code, source=f"knowledge_base:{label}")
+        task["code"], task["source"], task["status"] = code, f"knowledge_base:{label}", "done"
+        brain_os_metrics["direct_answers"] += 1
+        return task
+
     # Phase 17: Decision Engine gets a chance before a coding AI call.
     # greeting/bot_info ক্যাটাগরি coding-context-এ কখনোই সঠিক উত্তর নয়।
+    relevant_rules: List[str] = []
+    decision = None
     decision_request = (
         f"Project: {project['name']}\nStack: {project['stack']}\n"
         f"Task: {task['title']}\nDescription: {task['description']}"
@@ -13129,26 +13617,35 @@ async def process_next_code_task(project: dict):
         )
         if decision.get("strategy") == "direct":
             direct_code = _brain_payload_to_answer(decision.get("payload"))
+            code_ok = False
             if direct_code:
                 direct_code = _strip_code_fences(direct_code)
-                code_ok = False
                 try:
                     code_ok = _coding_result_looks_like_code(direct_code, project.get("stack", ""))
                 except Exception as e:
                     logger.debug("Decision code-sanity check fallback to AI: %s", e)
                     code_ok = False
-                if code_ok:
-                    save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
-                    task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
-                    brain_os_metrics["direct_answers"] += 1
-                    return task
-                logger.info(
-                    "Decision Engine direct answer rejected by code-sanity (stage=%s)",
-                    decision.get("stage"),
-                )
+            if code_ok:
+                save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
+                task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
+                brain_os_metrics["direct_answers"] += 1
+                return task
+            logger.info(
+                "Decision Engine direct answer rejected by code-sanity (stage=%s)",
+                decision.get("stage"),
+            )
             brain_os_metrics["direct_failures"] += 1
     except Exception as e:
         logger.warning("Phase 17 coding Decision Engine fallback: %s", e)
+        decision = None
+    # Gap fix: Decision Engine থেকে knowledge/pattern/template ম্যাচ এসেও কোড-চেকে
+    # ফেল করলে (স্ট্র্যাটেজ direct) বা confidence কম বলে সরাসরি ai-তে পড়লে এন্ট্রিগুলো
+    # আগে সম্পূর্ণ বাতিল হয়ে যেত। ইউজারের /addknowledge, /addpattern, /addtemplate
+    # দেওয়া নিয়ম প্রায়শই কোড নয়, টেক্সট-গাইডলাইন — ফেলে না দিয়ে candidate list থেকে
+    # শীর্ষ কয়েকটা non-code এন্ট্রি তুলে নিই; নিচে AI-এর system_prompt-এ "অবশ্যই মেনে
+    # চলার নিয়ম" হিসেবে যাবে। (code_ok হলে উপরেই return — এখানে শুধু AI-routেই আসে।)
+    if decision is not None:
+        relevant_rules = _collect_relevant_brain_rules(decision, project.get("stack", ""))
 
     if is_no_api_mode(project.get("user_id", 0)):
         stuck_msg = build_no_api_stuck_message({"stage": "coding_ai_route", "confidence": 0.0})
@@ -13191,6 +13688,14 @@ async def process_next_code_task(project: dict):
         )
     else:
         system_prompt += "\nএটাই এই প্রজেক্টের প্রথম কোড — নতুন ফাইল লেখো।"
+    # Decision Engine-এর প্রাসঙ্গিক কিন্তু কোড-না-হওয়া এন্ট্রিগুলো (/addknowledge,
+    # /addpattern, /addtemplate-এ দেওয়া নিয়ম) নির্দেশনা হিসেবে AI-কে জানানো হয়।
+    if relevant_rules:
+        system_prompt += (
+            "\nএই ধাপের কোড লেখার সময় নিচের প্রাসঙ্গিক নিয়ম/গাইডলাইনগুলো অবশ্যই মেনে চলো:\n"
+            + "\n".join(f"- {rule}" for rule in relevant_rules)
+            + "\n"
+        )
     live_context = _brain_get_live_context(project.get("user_id", 0)) if project.get("user_id") else ""
     if live_context:
         context_note += "\nBrain OS context:\n" + live_context
