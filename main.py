@@ -6674,23 +6674,29 @@ async def localize(user_id: int, bn_text: str) -> str:
 async def quota_guard(update: Update, action: str = "general") -> bool:
     """সীমা শেষ হলে মেসেজ পাঠিয়ে False রিটার্ন করে, কাজ চালিয়ে যাওয়া ঠিক থাকলে True।"""
     user_id = update.effective_user.id
+    # Note: Use effective_message to handle edited message updates safely.
+    # Pattern should be audited repo-wide in a follow-up.
+    msg = update.message or update.effective_message
     if is_banned(user_id):
-        await update.message.reply_text(await localize(user_id, "দুঃখিত, আপনাকে এই বট ব্যবহার করা থেকে বিরত রাখা হয়েছে।"))
+        if msg:
+            await msg.reply_text(await localize(user_id, "দুঃখিত, আপনাকে এই বট ব্যবহার করা থেকে বিরত রাখা হয়েছে।"))
         return False
     if user_id not in ADMIN_IDS and not flood_check(user_id):
-        await update.message.reply_text(
-            await localize(user_id, f"⚠️ আপনি খুব দ্রুত মেসেজ পাঠাচ্ছেন। অনুগ্রহ করে {FLOOD_BLOCK_SECONDS} সেকেন্ড অপেক্ষা করুন।")
-        )
+        if msg:
+            await msg.reply_text(
+                await localize(user_id, f"⚠️ আপনি খুব দ্রুত মেসেজ পাঠাচ্ছেন। অনুগ্রহ করে {FLOOD_BLOCK_SECONDS} সেকেন্ড অপেক্ষা করুন।")
+            )
         return False
     if not check_and_use_quota(user_id):
         daily_limit = get_daily_limit(user_id)
         extra_hint = "" if is_premium_active(user_id) else " বেশি সীমা পেতে প্রিমিয়াম নিন — /premiumstatus দেখুন।"
-        await update.message.reply_text(
-            await localize(
-                user_id,
-                f"আজকের সীমা ({daily_limit} বার) শেষ হয়ে গেছে। আগামীকাল আবার ব্যবহার করতে পারবেন।{extra_hint}",
+        if msg:
+            await msg.reply_text(
+                await localize(
+                    user_id,
+                    f"আজকের সীমা ({daily_limit} বার) শেষ হয়ে গেছে। আগামীকাল আবার ব্যবহার করতে পারবেন।{extra_hint}",
+                )
             )
-        )
         return False
     log_usage(user_id, action)
     return True
@@ -9223,8 +9229,11 @@ async def send_long_text(update: Update, text: str):
     text = text.strip()
     if not text:
         return
+    msg = update.message or update.effective_message
+    if not msg:
+        return
     for i in range(0, len(text), TELEGRAM_MAX_MSG_LEN):
-        await update.message.reply_text(text[i:i + TELEGRAM_MAX_MSG_LEN])
+        await msg.reply_text(text[i:i + TELEGRAM_MAX_MSG_LEN])
 
 
 async def pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12089,15 +12098,58 @@ async def coding_analyze_and_plan(raw_request: str, user_id: int) -> dict:
     # No API Mode চালু থাকলে ask_ai কল করার আগেই আটকানো হয় — dynamic-print ম্যাচে
     # পড়লে deterministic এক-ধাপের প্ল্যান, নইলে blocked fallback (দুটোতেই AI কল নেই)।
     if is_no_api_mode(user_id):
-        dynamic = _match_dynamic_print_request(raw_request)
-        if dynamic:
-            _label, _code, language = dynamic
-            return {
-                "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
-                "stack": language,
-                "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
-                "deterministic": True,
-            }
+        # ১. Deterministic dynamic-print ম্যাচ চেষ্টা
+        try:
+            dynamic = _match_dynamic_print_request(raw_request)
+            if dynamic:
+                _label, _code, language = dynamic
+                return {
+                    "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                    "stack": language,
+                    "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                    "deterministic": True,
+                }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan dynamic_print check failed: %s", e)
+
+        # ২. Fixed Knowledge Base (CODE_KNOWLEDGE_BASE) ম্যাচ চেষ্টা
+        try:
+            kb_match = match_knowledge_base(
+                raw_request, "", project_name=raw_request[:40].strip() or "নতুন প্রজেক্ট", project_desc=raw_request
+            )
+            if kb_match:
+                return {
+                    "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                    "stack": "python",
+                    "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                    "deterministic": True,
+                }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan KB match check failed: %s", e)
+
+        # ৩. Brain OS Decision Engine ম্যাচ চেষ্টা
+        try:
+            decision = await decision_engine_service.execute_async(
+                raw_request,
+                user_id=user_id,
+                session_key=str(user_id),
+                exclude_categories=list(CODING_EXCLUDED_BRAIN_CATEGORIES),
+            )
+            if decision and decision.get("strategy") == "direct":
+                direct_code = _brain_payload_to_answer(decision.get("payload"))
+                if direct_code:
+                    direct_code = _strip_code_fences(direct_code)
+                    if _coding_result_looks_like_code(direct_code, "python"):
+                        return {
+                            "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                            "stack": "python",
+                            "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                            "deterministic": True,
+                        }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan Decision Engine check failed: %s", e)
+
+        # ৪. কোনোটিতেই না মিললে blocked fallback
         stuck_msg = build_no_api_stuck_message({"stage": "coding_plan_ai", "confidence": 0.0})
         return {
             "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
@@ -15299,17 +15351,21 @@ async def contextpreview_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/codeproject <বিবরণ> — নতুন কোডিং প্রজেক্ট শুরু করে (Prompt Analyze + Project Plan)।"""
+    # Note: Use effective_message to handle edited message updates safely.
+    # Pattern should be audited repo-wide in a follow-up.
+    msg = update.message or update.effective_message
     if not context.args:
-        await update.message.reply_text(
-            "এভাবে লিখুন: /codeproject <আপনার কোডিং প্রজেক্টের বিবরণ>\n"
-            "উদাহরণ: /codeproject একটা Flask API বানাও যেখানে ইউজার রেজিস্ট্রেশন ও লগইন থাকবে"
-        )
+        if msg:
+            await msg.reply_text(
+                "এভাবে লিখুন: /codeproject <আপনার কোডিং প্রজেক্টের বিবরণ>\n"
+                "উদাহরণ: /codeproject একটা Flask API বানাও যেখানে ইউজার রেজিস্ট্রেশন ও লগইন থাকবে"
+            )
         return
     if not await quota_guard(update, action="coding_plan"):
         return
     user_id = update.effective_user.id
     raw_request = " ".join(context.args).strip()
-    thinking = await update.message.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...")
+    thinking = await msg.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...") if msg else None
     try:
         plan = await coding_analyze_and_plan(raw_request, user_id)
         project_id = create_code_project(user_id, plan["project_name"], raw_request, plan["stack"], plan["tasks"])
@@ -15325,7 +15381,8 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if plan.get("no_api_blocked"):
             # No API Mode-এ AI প্ল্যান হয়নি — "AI দিয়ে প্ল্যান তৈরি হয়েছে" দাবি না করে
             # /codeplan-এর মতোই blocked মেসেজ দেখানো হয়।
-            await update.message.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
+            if msg:
+                await msg.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
         else:
             deterministic_note = (
                 "\n\n🤖 এই প্ল্যানটি AI কল ছাড়াই deterministicভাবে তৈরি হয়েছে।"
@@ -15339,12 +15396,15 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 + "\n\nপরের ধাপ প্রসেস করতে /codenext লিখুন।",
             )
     except AIProviderError as e:
-        await update.message.reply_text(f"দুঃখিত, প্ল্যান বানাতে সমস্যা হয়েছে: {e}")
+        if msg:
+            await msg.reply_text(f"দুঃখিত, প্ল্যান বানাতে সমস্যা হয়েছে: {e}")
     except Exception as e:
         logger.error(f"Coding Orchestrator (/codeproject) এরর: {e}")
-        await update.message.reply_text("দুঃখিত, প্রজেক্ট প্ল্যান বানাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        if msg:
+            await msg.reply_text("দুঃখিত, প্রজেক্ট প্ল্যান বানাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
     finally:
-        await thinking.delete()
+        if thinking:
+            await thinking.delete()
 
 
 async def codenext_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
