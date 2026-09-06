@@ -17851,7 +17851,165 @@ def _oauth_pkce_ok(code_verifier: Optional[str], code_challenge: Optional[str], 
     return computed == code_challenge
 
 
-def _build_mcp_server():
+# =============================================================================
+# MCP টুল: simulate_message — Claude/MCP ক্লায়েন্ট থেকে বটের রিপ্লাই সিমুলেট করা।
+# টেলিগ্রাম বা প্রোডাকশন ইউজার/ডেটা স্পর্শ না করে, হালকা fake Update/Context দিয়ে
+# কমান্ড-হ্যান্ডলার ফাংশন সরাসরি চালিয়ে রিপ্লাই-টেক্সটগুলো ফেরত দেয়।
+# =============================================================================
+
+# command (slash ছাড়া, lowercase) -> হ্যান্ডলার ফাংশন। run_bot_async()-এ app.handlers
+# স্ক্যান করে অটো-ভরা হয় (নতুন কমান্ড যোগ হলেও ম্যাপ অটোমেটিক আপডেট হয়)।
+_COMMAND_HANDLERS: Dict[str, Callable] = {}
+
+
+def _collect_command_handlers(app=None) -> Dict[str, Callable]:
+    """app.handlers-এ রেজিস্টার করা প্রতিটা CommandHandler থেকে command→callback ম্যাপ
+    বানিয়ে _COMMAND_HANDLERS-এ রাখে (`.commands`/`.callback` পড়ে — robust/future-proof:
+    কোথাও আলাদা করে কমান্ড-তালিকা বজায় রাখতে হয় না)। app না দিলে (টেস্ট/ডাইরেক্ট-কল)
+    আগে থেকে জমা থাকা ম্যাপ অক্ষত থাকে।"""
+    if app is None:
+        return _COMMAND_HANDLERS
+    try:
+        for group_handlers in getattr(app, "handlers", {}).values():
+            for handler in group_handlers:
+                commands = getattr(handler, "commands", None)
+                callback = getattr(handler, "callback", None)
+                if commands and callable(callback):
+                    for cmd in commands:
+                        _COMMAND_HANDLERS[str(cmd).lstrip("/").lower()] = callback
+    except Exception as e:  # noqa: BLE001
+        logger.debug("MCP command-handler scan skipped: %s", e)
+    return _COMMAND_HANDLERS
+
+
+def _resolve_command_handler(command_name: str):
+    """কমান্ড নাম → হ্যান্ডলার ফাংশন। অগ্রাধিকার: app.handlers থেকে অটো-কালেক্টেড
+    _COMMAND_HANDLERS; ফলব্যাক: মডিউল গ্লোবাল '<cmd>_command' (টেস্টে app ছাড়া সরাসরি
+    ব্যবহারের জন্য — ping→ping_command, codeproject→codeproject_command ইত্যাদি)।"""
+    handler = _COMMAND_HANDLERS.get(command_name)
+    if handler is None:
+        handler = globals().get(f"{command_name}_command")
+    return handler if callable(handler) else None
+
+
+class _SimSentMessage:
+    """fake reply_text()/edit_text()-এর রিটার্ন অবজেক্ট — .edit_text()/.delete() সাপোর্ট করে।"""
+
+    def __init__(self, sink: List[str]):
+        self._sink = sink
+
+    async def edit_text(self, text: str, **kwargs):
+        # ping_command-এর মতো হ্যান্ডলার "thinking" মেসেজ edit করে — নতুন টেক্সটও জমা হয়।
+        self._sink.append(str(text))
+        return self
+
+    async def delete(self):
+        # codeproject/codenext-এর "thinking" মেসেজ delete() কল করে — সিমুলেশনে no-op।
+        return None
+
+
+class _SimUser:
+    def __init__(self, user_id: int):
+        self.id = user_id
+        self.first_name = "MCP"
+        self.username = "mcp_client"
+        self.language_code = "bn"
+
+
+class _SimMessage:
+    """fake Update.message — reply_text() শুধু লোকাল লিস্টে জমা করে; কোনো নেটওয়ার্ক কল নেই।"""
+
+    def __init__(self, user_id: int, text: str, chat_id: int):
+        self.text = text
+        self.chat_id = chat_id
+        self.from_user = _SimUser(user_id)
+        self.reply_to_message = None
+        self.sent: List[str] = []
+
+    async def reply_text(self, text: str, **kwargs):
+        self.sent.append(str(text))
+        return _SimSentMessage(self.sent)
+
+
+class _SimUpdate:
+    """fake Update — effective_user/effective_chat/effective_message + message.text/chat_id।"""
+
+    def __init__(self, user_id: int, text: str, chat_id: int):
+        self.effective_user = _SimUser(user_id)
+        self.effective_chat = _SimUser(user_id)
+        self.message = _SimMessage(user_id, text, chat_id)
+        self.effective_message = self.message
+
+    @property
+    def sent_texts(self) -> List[str]:
+        return self.message.sent
+
+
+class _SimContext:
+    """fake Context — args (কমান্ডের পরের শব্দ) + bot_data/user_data (খালি dict)।"""
+
+    def __init__(self, args: Optional[List[str]] = None):
+        self.args = list(args) if args is not None else []
+        self.user_data: Dict[str, Any] = {}
+        self.bot_data: Dict[str, Any] = {}
+        self.bot = None  # সিমুলেশনে কোনো আসল Bot অবজেক্ট নেই (নো নেটওয়ার্ক)
+
+
+def _build_fake_update_context(user_id: int, text: str):
+    """সিমুলেশনের জন্য হালকা fake (Update, Context) জোড়া বানায় — টেস্ট ফাইলগুলোর
+    FakeUpdate/FakeMessage/FakeContext প্যাটার্নের মতোই (tests/test_real_search_integration.py)।
+    কোনো টেলিগ্রাম/নেটওয়ার্ক কল হয় না।"""
+    text = text or ""
+    stripped = text.strip()
+    args: List[str] = []
+    if stripped.startswith("/"):
+        parts = stripped.split()
+        if len(parts) > 1:
+            args = parts[1:]
+    return _SimUpdate(user_id, text, chat_id=user_id), _SimContext(args)
+
+
+async def simulate_message(text: str, user_id: int = 990000001) -> dict:
+    """বটকে একটা মেসেজ/কমান্ড পাঠালে বট যে টেক্সট-রিপ্লাইগুলো পাঠাত সেগুলো ফেরত দেয় — টেলিগ্রাম ছাড়াই,
+    লোকালি টেস্ট করার জন্য। প্রোডাকশন ইউজার বা আসল Bot/Application-কে কিছুই স্পর্শ করে না।
+
+    ব্যবহার:
+      - যেকোনো কমান্ড: "/ping", "/noapimode on", "/codeproject <বিবরণ>", "/codenext" ইত্যাদি।
+      - কমান্ড ছাড়া সাধারণ টেক্সটও দেওয়া যায় (chat_general দিয়ে উত্তর হয়)।
+      - আগে "/noapimode on" দিয়ে No API Mode চালু করে "/codeproject ..." → "/codenext"
+        চালালে AI/নেটওয়ার্ক কল ছাড়াই deterministic উত্তর পাওয়া যায়।
+      - user_id ঐচ্ছিক (ডিফল্ট 990000001) — আলাদা আইডি দিলে টেস্ট-ডেটা প্রোডাকশন থেকে আলাদা থাকে।
+
+    রিটার্ন: {"status": "ok"|"error", "replies": [রিপ্লাই-টেক্সট...], "user_id": int}
+    (কোনো হ্যান্ডলার এরর দিলে status="error" + error মেসেজ + তখন পর্যন্ত জমা হওয়া replies।)
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"status": "error", "error": "empty message", "replies": []}
+
+    register_user(user_id)
+    update, context = _build_fake_update_context(user_id, text)
+
+    handler = None
+    if text.startswith("/"):
+        command_name = text[1:].split()[0].split("@")[0].lower()
+        handler = _resolve_command_handler(command_name)
+    else:
+        handler = chat_general
+
+    if handler is None:
+        # কমান্ড চেনা যায়নি — স্পেসিফিকেশন অনুযায়ী সাধারণ চ্যাট হিসেবে chat_general-এ পাঠানো হয়।
+        handler = chat_general
+
+    try:
+        await handler(update, context)
+    except Exception as e:  # noqa: BLE001
+        logger.error("MCP simulate_message error: %s", e)
+        return {"status": "error", "error": str(e), "replies": list(update.sent_texts)}
+    return {"status": "ok", "replies": list(update.sent_texts), "user_id": user_id}
+
+
+def _build_mcp_server(app=None):
     """FastMCP সার্ভার বানায় ও টুলগুলো রেজিস্টার করে। ইমপোর্ট এখানে করা হয়েছে যাতে
     MCP লাইব্রেরি ইনস্টল না থাকলেও মূল বট চালু হতে কোনো বাধা না হয়।"""
     try:
@@ -17894,6 +18052,10 @@ def _build_mcp_server():
         streamable_http_path="/",
         transport_security=_transport_security,
     )
+
+    # simulate_message টুলের কমান্ড-ডিসপ্যাচের জন্য: app.handlers থেকে CommandHandler গুলো
+    # অটো-স্ক্যান করে _COMMAND_HANDLERS ম্যাপ বানাও (app না থাকলে ফলব্যাক গ্লোবাল-নেম ব্যবহার হয়)।
+    _collect_command_handlers(app)
 
     @mcp_app.tool()
     def add_knowledge(category: str, title: str, content: str, priority: int = 5,
@@ -18009,6 +18171,10 @@ def _build_mcp_server():
         """একসাথে অনেক Pattern যোগ করে। প্রতিটা dict-এ pattern_type/match_value/category/name
         থাকতে হবে। ডুপ্লিকেট স্বয়ংক্রিয়ভাবে স্কিপ হয়।"""
         return PatternEngine().bulk_import(patterns)
+
+    # simulate_message: মডিউল-লেভেল async ফাংশন (টেস্ট থেকে সরাসরি main.simulate_message() কল করা
+    # যায়) — FastMCP-এর tool() ডেকোরেটর একই ফাংশন ফেরত দেয়, তাই রেজিস্টার করলেও ফাংশন অক্ষত থাকে।
+    mcp_app.tool()(simulate_message)
 
     return mcp_app
 
@@ -18239,7 +18405,7 @@ async def run_bot_async():
         )
     elif MCP_ADMIN_TOKEN:
         try:
-            mcp_app = _build_mcp_server()
+            mcp_app = _build_mcp_server(app)
             # Phase 43-fix: host="0.0.0.0" parameter current FastMCP version-এ supported নয়
             # Host binding uvicorn config-এ (line 16337-এ) করা হয় "host=0.0.0.0" দিয়ে
             # streamable_http_app() শুধু ASGI app expose করে, host handling-এর দায়িত্ব নেয় না
