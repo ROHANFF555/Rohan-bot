@@ -16445,6 +16445,44 @@ def main():
     asyncio.run(run_bot_async())
 
 
+def make_telegram_webhook(app):
+    """Telegram webhook route handler বানায় (Starlette `request -> response`)।
+
+    আগে এই হ্যান্ডলারটা `run_bot_async()`-এর ভেতরে nested ছিল; টেস্ট থেকে আসল
+    কোডটাই চালানো যায় বলে factory আকারে মডিউল-লেভেলে তোলা হলো — আচরণ আগের
+    মতোই আছে (`app` closure-এ ধরা থাকে, Route রেজিস্ট্রেশন বদলায়নি)।
+
+    Render ক্র্যাশ-ফিক্স: `request.json()` সফল হলেও পেলোডে `update_id` না
+    থাকলে (যেমন `{}` — health-check বট/স্ক্যানার/মনিটরিং টুল পাঠাতে পারে)
+    `Update.de_json()` `TypeError` ছুঁড়ে পুরো রিকোয়েস্ট 500 দিয়ে ক্র্যাশ
+    করত। এখন অসম্পূর্ণ পেলোড চুপচাপ `ok` দিয়ে উপেক্ষা করা হয়, আর প্রসেসিং
+    এরর লগে রেখে `ok`-ই ফেরত দেওয়া হয় (এরর দেখালে টেলিগ্রাম বারবার
+    রিট্রাই করবে)।
+    """
+    from starlette.responses import PlainTextResponse
+
+    async def telegram_webhook(request):
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            return PlainTextResponse("bad request", status_code=400)
+        if not isinstance(data, dict) or "update_id" not in data:
+            # আসল টেলিগ্রাম আপডেট না (health-check/স্ক্যানার/ভুল পেলোড) —
+            # ক্র্যাশ না করে চুপচাপ ok রিটার্ন করো, যাতে সার্ভার স্থিতিশীল থাকে।
+            logger.debug("telegram_webhook: অচেনা/অসম্পূর্ণ পেলোড উপেক্ষা করা হলো: %r", data)
+            return PlainTextResponse("ok")
+        try:
+            update = Update.de_json(data, app.bot)
+            await app.process_update(update)
+        except Exception as e:  # noqa: BLE001
+            logger.error("telegram_webhook: আপডেট প্রসেস করতে ব্যর্থ: %s", e, exc_info=True)
+            # টেলিগ্রামকে এরর দেখালে ও বারবার রিট্রাই করবে — তাই ok-ই রিটার্ন করা ভালো,
+            # কিন্তু এররটা লগে থাকবে যাতে ডিবাগ করা যায়।
+        return PlainTextResponse("ok")
+
+    return telegram_webhook
+
+
 async def run_bot_async():
     init_db()
     seed_brain_os_defaults()
@@ -16625,14 +16663,7 @@ async def run_bot_async():
     PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
     WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", TELEGRAM_BOT_TOKEN.split(":")[0])
 
-    async def telegram_webhook(request):
-        try:
-            data = await request.json()
-        except Exception:  # noqa: BLE001
-            return PlainTextResponse("bad request", status_code=400)
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-        return PlainTextResponse("ok")
+    telegram_webhook = make_telegram_webhook(app)
 
     async def health_check(request):
         return JSONResponse({"status": "ok", "bot": "running"})
