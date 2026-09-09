@@ -22,6 +22,7 @@ Usage::
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -94,6 +95,86 @@ _CONFIDENCE_HIGH_MIN = attribution_config.CONFIDENCE_HIGH_MIN
 _CONFIDENCE_MEDIUM_MIN = attribution_config.CONFIDENCE_MEDIUM_MIN
 #: সোর্সভেদে ডিফল্ট confidence — প্রতিবার env পড়া এড়াতে মডিউল লেভেলেই রাখা।
 _DEFAULT_CONFIDENCE = dict(attribution_config.DEFAULT_CONFIDENCE)
+
+#: পরিচিত ব্রাউজার-সোর্স নাম → ব্যাজে দেখানোর পরিষ্কার display নাম (লোয়ারকেস কী দিয়ে ম্যাচ)।
+_SOURCE_NAME_NORMALIZATIONS: Dict[str, str] = {
+    "duckduckgo instant answer": "DuckDuckGo",
+    "duckduckgo": "DuckDuckGo",
+    "dax": "DuckDuckGo",
+    "tavily web search": "Tavily",
+    "tavily": "Tavily",
+}
+
+
+def _normalize_source_name(name: str) -> str:
+    """কাঁচা সোর্স নাম থেকে ব্যাজে দেখানোর পরিষ্কার নাম বানায়।
+
+    ``DuckDuckGo Instant Answer`` → ``DuckDuckGo``, ``Tavily Web Search`` → ``Tavily``।
+    বাকি নামগুলো (যেমন ``Wikipedia (bn)``, ``bbc.com``) যথাসম্ভব অপরিবর্তিত রাখা হয়।
+    """
+    text = (name or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower().strip()
+    if lowered in _SOURCE_NAME_NORMALIZATIONS:
+        return _SOURCE_NAME_NORMALIZATIONS[lowered]
+    return text
+
+
+def _extract_wikipedia_lang(text: str) -> str:
+    """``Wikipedia (bn)``-এর মতো নাম বা ``https://bn.wikipedia.org/...`` URL থেকে ভাষা-কোড বের করে।"""
+    value = (text or "").strip()
+    m = re.search(r"wikipedia\s*\(\s*([a-zA-Z][a-zA-Z\-]*)\s*\)", value, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+    m_url = re.search(
+        r"https?://([a-zA-Z][a-zA-Z\-]*)\.wikipedia\.org", value, re.IGNORECASE
+    )
+    if m_url:
+        return m_url.group(1).lower()
+    return ""
+
+
+def _domain_from_url(url: str) -> str:
+    """URL থেকে ``www.``/``m.`` উপসর্গ ছাড়া ডোমেইন বের করে (যেমন ``bbc.com``)।"""
+    text = (url or "").strip()
+    if not text:
+        return ""
+    m = re.match(r"https?://([^/?#]+)", text, re.IGNORECASE)
+    if not m:
+        return ""
+    host = m.group(1).lower()
+    for prefix in ("www.", "m.", "mobile."):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+            break
+    return host
+
+
+def _derive_source_name(found: Optional[Dict[str, Any]]) -> str:
+    """Browse result থেকে ব্যাজে দেখানোর সোর্স-নাম বের করে।
+
+    পছন্দের ক্রম:
+      1. ``matched_source`` / ``source``-এর স্বাভাবিকীকৃত নাম (DuckDuckGo/Tavily/Wikipedia…)।
+      2. শুধু ``Wikipedia`` (ভাষা ছাড়া) থাকলে ``source_lang_code``/URL থেকে ভাষা জুড়ে
+         ``Wikipedia (bn)``-এর মতো বানানো হয়।
+      3. কোনো নামই না থাকলে URL থেকে ডোমেইন (যেমন ``bbc.com``)।
+    """
+    if not isinstance(found, dict):
+        return ""
+    raw = (found.get("matched_source") or found.get("source") or "").strip()
+    name = _normalize_source_name(raw)
+    if name.lower() == "wikipedia":
+        lang = str(found.get("source_lang_code") or "").strip().lower()
+        if not lang:
+            lang = _extract_wikipedia_lang(str(found.get("url") or ""))
+        if lang:
+            name = f"Wikipedia ({lang})"
+    if not name:
+        domain = _domain_from_url(str(found.get("url") or ""))
+        if domain:
+            name = _normalize_source_name(domain)
+    return name
 
 
 def coerce_source(source: Any) -> DataSource:
@@ -215,6 +296,7 @@ class SourceMetadata:
         breakdown: Optional[Dict[str, float]] = None,
         checked_sources: Optional[Iterable[str]] = None,
         query: str = "",
+        source_name: Optional[str] = None,
     ) -> None:
         self.primary_source = coerce_source(primary_source)
         self.timestamp = _as_utc(timestamp)
@@ -248,6 +330,7 @@ class SourceMetadata:
             str(item).strip() for item in (checked_sources or []) if str(item).strip()
         ]
         self.query = (query or "").strip()
+        self.source_name = _normalize_source_name(source_name)
 
     # ------------------------------------------------------------------ helpers
 
@@ -298,11 +381,24 @@ class SourceMetadata:
         return DataSource.HYBRID if self.is_hybrid else self.primary_source
 
     def label(self, source: Optional[DataSource] = None, lang: str = "bn") -> str:
-        """একটা উৎসের ডিসপ্লে লেবেল (ডিফল্ট: কার্যকর উৎস)।"""
+        """একটা উৎসের ডিসপ্লে লেবেল (ডিফল্ট: কার্যকর উৎস)।
+
+        ``BROWSER``-এর ক্ষেত্রে নির্দিষ্ট সোর্স-নাম (``self.source_name``) থাকলে সেইটাই
+        দেখানো হয় (যেমন ``🌐 Wikipedia (bn)``), নইলে জেনেরিক ``🌐 ব্রাউজার সার্চ``।
+        """
         member = source or self.effective_source
+        if member is DataSource.BROWSER and self.source_name:
+            return self._browser_source_label()
         if lang == "bn":
             return SOURCE_BN_LABELS.get(member, member.value)
         return member.value
+
+    def _browser_source_label(self) -> str:
+        """``source_name``-কে ব্যাজের উপযোগী লেবেলে পরিণত করে (``🌐`` উপসর্গসহ)।"""
+        name = self.source_name
+        if name.startswith("🌐"):
+            return name
+        return f"🌐 {name}"
 
     def _effective_breakdown(self) -> List[Tuple[DataSource, float]]:
         """Detailed ব্যাজের জন্য (উৎস, শতাংশ) তালিকা — breakdown না দিলে নিজে ভাগ করে।
@@ -499,6 +595,7 @@ class SourceMetadata:
             "breakdown": dict(self.breakdown),
             "checked_sources": list(self.checked_sources),
             "query": self.query,
+            "source_name": self.source_name,
         }
 
     @classmethod
@@ -525,13 +622,15 @@ class SourceMetadata:
             breakdown=payload.get("breakdown") or None,
             checked_sources=payload.get("checked_sources") or [],
             query=payload.get("query", ""),
+            source_name=payload.get("source_name"),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - ডিবাগ সহায়ক
         return (
             f"SourceMetadata(primary={self.primary_source.name!r}, "
             f"secondary={[m.name for m in self.secondary_sources]!r}, "
-            f"confidence={self.confidence_score:.2f}, urls={len(self.urls)})"
+            f"confidence={self.confidence_score:.2f}, urls={len(self.urls)}, "
+            f"source_name={self.source_name!r})"
         )
 
 
@@ -550,6 +649,7 @@ def build_metadata(
     timestamp: Optional[datetime] = None,
     checked_sources: Optional[Iterable[str]] = None,
     query: str = "",
+    source_name: Optional[str] = None,
 ) -> SourceMetadata:
     """কীবোর্ড-আর্গুমেন্ট দিয়ে দ্রুত `SourceMetadata` বানানোর শর্টকাট।"""
     return SourceMetadata(
@@ -563,6 +663,7 @@ def build_metadata(
         breakdown=breakdown,
         checked_sources=checked_sources,
         query=query,
+        source_name=source_name,
     )
 
 
@@ -597,6 +698,7 @@ def metadata_from_browse_result(
         checked_sources=found.get("tried_sources") or [],
         query=query,
         note="কাঁচা ওয়েব-তথ্য AI দিয়ে গুছিয়ে লেখা" if organized_by_ai else "",
+        source_name=_derive_source_name(found),
     )
     url = (found.get("url") or "").strip()
     if url:

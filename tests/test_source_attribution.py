@@ -697,6 +697,172 @@ class MetadataBuilderTests(unittest.TestCase):
         )
 
 
+class SourceSpecificBadgeTests(unittest.TestCase):
+    """Phase 53: Browse-ফলাফলে generic '🌐 Browser Search'-এর বদলে প্রকৃত সোর্স-নাম দেখানো।
+
+    যাচাই: Wikipedia (bn/en), DuckDuckGo, Tavily ও সাধারণ ডোমেইন-ভিত্তিক ফলাফলে সঠিক
+    সোর্স-নির্দিষ্ট badge দেখা যায় — আর organized_by_ai-এর সাথে conflict করে না
+    (অর্থাৎ badge একসাথে সোর্স + AI-organization/Hybrid দুটোই বহন করে)।
+    """
+
+    SETTINGS = {
+        "enabled": True,
+        "format": "compact",
+        "lang": "bn",
+        "commands": {"chat": {"enabled": True, "format": "compact"}},
+        "confidence": {},
+    }
+
+    def _found(
+        self,
+        *,
+        source: str = "",
+        matched_source: str = "",
+        url: str = "",
+        source_lang_code: str = "",
+        text: str = "উত্তর",
+    ) -> dict:
+        return {
+            "text": text,
+            "source": source,
+            "url": url,
+            "tried_sources": [],
+            "matched_source": matched_source,
+            "source_lang_code": source_lang_code,
+        }
+
+    def test_wikipedia_bn_badge(self):
+        meta = st.metadata_from_browse_result(
+            self._found(
+                source="Wikipedia (bn)",
+                matched_source="Wikipedia (bn)",
+                url="https://bn.wikipedia.org/wiki/ঢাকা",
+            )
+        )
+        self.assertEqual(meta.source_name, "Wikipedia (bn)")
+        self.assertIn("🌐 Wikipedia (bn)", meta.to_badge("compact", "bn"))
+        self.assertNotIn("🌐 ব্রাউজার সার্চ", meta.to_badge("compact", "bn"))
+        self.assertNotIn("🌐 Browser Search", meta.to_badge("compact", "en"))
+
+    def test_wikipedia_en_badge(self):
+        meta = st.metadata_from_browse_result(
+            self._found(
+                source="Wikipedia (en)",
+                matched_source="Wikipedia (en)",
+                url="https://en.wikipedia.org/wiki/London",
+            )
+        )
+        self.assertEqual(meta.source_name, "Wikipedia (en)")
+        self.assertIn("🌐 Wikipedia (en)", meta.to_badge("compact", "en"))
+        self.assertNotIn("🌐 Browser Search", meta.to_badge("compact", "en"))
+
+    def test_duckduckgo_badge(self):
+        meta = st.metadata_from_browse_result(
+            self._found(
+                source="Wikipedia",
+                matched_source="DuckDuckGo Instant Answer",
+                url="https://en.wikipedia.org/wiki/London",
+            )
+        )
+        self.assertEqual(meta.source_name, "DuckDuckGo")
+        self.assertIn("🌐 DuckDuckGo", meta.to_badge("compact", "bn"))
+        self.assertNotIn("🌐 ব্রাউজার সার্চ", meta.to_badge("compact", "bn"))
+
+    def test_tavily_badge(self):
+        meta = st.metadata_from_browse_result(
+            self._found(
+                source="Tavily Web Search",
+                matched_source="Tavily Web Search",
+                url="https://tavily.com/news",
+            )
+        )
+        self.assertEqual(meta.source_name, "Tavily")
+        self.assertIn("🌐 Tavily", meta.to_badge("compact", "en"))
+        self.assertNotIn("🌐 Browser Search", meta.to_badge("compact", "en"))
+
+    def test_generic_domain_badge_from_url(self):
+        meta = st.metadata_from_browse_result(
+            self._found(url="https://www.bbc.com/news/world", text="x")
+        )
+        self.assertEqual(meta.source_name, "bbc.com")
+        self.assertIn("🌐 bbc.com", meta.to_badge("compact", "en"))
+        self.assertNotIn("🌐 Browser Search", meta.to_badge("compact", "en"))
+
+    def test_wikipedia_lang_code_appended_when_missing_in_name(self):
+        meta = st.metadata_from_browse_result(
+            self._found(
+                source="Wikipedia",
+                matched_source="Wikipedia",
+                url="https://example.invalid/wiki/x",
+                source_lang_code="bn",
+            )
+        )
+        self.assertEqual(meta.source_name, "Wikipedia (bn)")
+
+    def test_source_name_already_present_is_used(self):
+        """found-এ source name ইতিমধ্যে থাকলে সেটাই ব্যবহার হয় (নতুন বানানো লাগে না)।"""
+        meta = st.SourceMetadata("browser", source_name="Wikipedia (bn)")
+        self.assertEqual(
+            meta.to_badge("compact", "bn").splitlines()[0],
+            "_উৎস: 🌐 Wikipedia (bn)_",
+        )
+
+    def test_no_source_name_still_generic(self):
+        meta = st.SourceMetadata("browser")
+        self.assertEqual(
+            meta.to_badge("compact", "bn").splitlines()[0],
+            "_উৎস: 🌐 ব্রাউজার সার্চ_",
+        )
+
+    def test_organized_by_ai_keeps_source_and_groq_badge(self):
+        found = self._found(
+            source="Wikipedia (en)",
+            matched_source="Wikipedia (en)",
+            url="https://en.wikipedia.org/wiki/London",
+        )
+        plain = st.metadata_from_browse_result(found, organized_by_ai=False)
+        hybrid = st.metadata_from_browse_result(found, organized_by_ai=True)
+
+        # Not organized → শুধু সোর্স badge (Groq/Hybrid নেই)
+        self.assertEqual(
+            plain.to_badge("compact", "bn").splitlines()[0],
+            "_উৎস: 🌐 Wikipedia (en)_",
+        )
+        self.assertNotIn("🔵 Groq API", plain.to_badge("compact", "bn"))
+
+        # Organized → সোর্স + Groq (Hybrid) দুটোই
+        self.assertEqual(
+            hybrid.to_badge("compact", "bn").splitlines()[0],
+            "_উৎস: 🌐 Wikipedia (en) | 🔵 Groq API_",
+        )
+        self.assertIn("ধরন: 🔄 সম্মিলিত", hybrid.to_badge("full", "bn"))
+
+    def test_format_with_source_shows_specific_source_for_user(self):
+        out = st.format_with_source(
+            "ওয়েব উত্তর",
+            st.metadata_from_browse_result(
+                self._found(
+                    source="Wikipedia (bn)",
+                    matched_source="Wikipedia (bn)",
+                    url="https://bn.wikipedia.org/wiki/ঢাকা",
+                )
+            ),
+            command="chat",
+            settings=self.SETTINGS,
+        )
+        self.assertIn("🌐 Wikipedia (bn)", out)
+        self.assertNotIn("🌐 ব্রাউজার সার্চ", out)
+        self.assertNotIn("🌐 Browser Search", out)
+
+    def test_source_name_survives_round_trip(self):
+        meta = st.SourceMetadata("browser", source_name="Tavily")
+        restored = st.SourceMetadata.from_dict(meta.to_dict())
+        self.assertEqual(restored.source_name, "Tavily")
+        self.assertEqual(
+            restored.to_badge("compact", "en"), meta.to_badge("compact", "en")
+        )
+
+
 class FormatWithSourceTests(unittest.TestCase):
     SETTINGS = {
         "enabled": True,
@@ -1755,7 +1921,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             text = self.chat("স্বয়ংক্রিয় প্রশ্ন")
         ask_ai.assert_not_awaited()
         self.assertIn("স্বয়ংক্রিয় ওয়েব তথ্য।", text)
-        self.assertIn("🌐 ব্রাউজার সার্চ", text)
+        self.assertIn("🌐 DuckDuckGo", text)
         self.assertTrue(client.hit("duckduckgo.com"))
 
     def test_no_api_mode_skips_browser_and_api(self):
@@ -1952,8 +2118,8 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_not_awaited()
         self.assertIn("কাঁচা তথ্য।", answer)
-        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
-        self.assertNotIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        self.assertIn("🌐 DuckDuckGo", answer)
+        self.assertNotIn("🌐 DuckDuckGo | 🔵 Groq API", answer)
         self.assertNotIn("🔄", answer)
 
     def test_automatic_browse_skips_ai_for_clean_bengali_wikipedia_result(self):
@@ -1973,8 +2139,8 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_not_awaited()
         self.assertIn("ঢাকা বাংলাদেশের রাজধানী ও বৃহত্তম শহর।", answer)
-        self.assertIn("_উৎস: 🌐 ব্রাউজার সার্চ_", answer)
-        self.assertNotIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        self.assertIn("_উৎস: 🌐 Wikipedia (bn)_", answer)
+        self.assertNotIn("🌐 Wikipedia (bn) | 🔵 Groq API", answer)
         self.assertNotIn("🔄 সম্মিলিত", answer)
 
     def test_browse_result_language_code_helper(self):
@@ -2035,7 +2201,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_not_awaited()
         self.assertIn("ড. মুহাম্মদ ইউনূস", answer)
-        self.assertIn("_উৎস: 🌐 ব্রাউজার সার্চ_", answer)
+        self.assertIn("_উৎস: 🌐 Wikipedia (bn)_", answer)
         self.assertNotIn("🔵 Groq API", answer)
         self.assertNotIn("🔄 সম্মিলিত", answer)
 
@@ -2058,7 +2224,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_not_awaited()
         self.assertIn("London is the capital", answer)
-        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
+        self.assertIn("🌐 Wikipedia (en)", answer)
         self.assertNotIn("🔵 Groq API", answer)
         self.assertNotIn("🔄", answer)
 
@@ -2079,7 +2245,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_awaited_once()
         self.assertIn("মুহাম্মদ ইউনূস হলেন একজন বাংলাদেশী", answer)
-        self.assertIn("🌐 ব্রাউজার সার্চ | 🔵 Groq API", answer)
+        self.assertIn("🌐 Wikipedia (en) | 🔵 Groq API", answer)
 
     def test_automatic_browse_raw_when_no_api_mode(self):
         self.main.set_no_api_mode(USER_ID, True)
@@ -2092,7 +2258,7 @@ class HandlerAttributionIntegrationTests(unittest.TestCase):
             )
         ask_ai.assert_not_awaited()
         self.assertIn("কাঁচা তথ্য।", answer)
-        self.assertIn("🌐 ব্রাউজার সার্চ", answer)
+        self.assertIn("🌐 DuckDuckGo", answer)
         self.assertNotIn("🔵 Groq API", answer)
 
     def test_automatic_browse_swallows_errors(self):
