@@ -4,6 +4,6 @@ edge-tts
 httpx
 python-dotenv
 mcp>=1.2.0
-fastmcp
+fastmcp>=2.0,<3
 starlette
 uvicorn
