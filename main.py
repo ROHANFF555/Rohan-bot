@@ -18188,6 +18188,68 @@ def _start_mcp_server_in_background():
     return
 
 
+# ============ Phase 43-diag: ডায়াগনস্টিক — সব ইনকামিং HTTP রিকোয়েস্ট লগ ============
+# প্রেক্ষাপট: OAuth ফ্লো (/oauth/register → /oauth/authorize → /oauth/token) Render লগে
+# সম্পূর্ণ সফল ("token ইস্যু সফল" পর্যন্ত), কিন্তু তারপর Claude-এর "connecting" ধাপে
+# (/mcp-তে আসল MCP initialize হ্যান্ডশেক) ঠিক কোথায় ভাঙছে তা বোঝা যাচ্ছে না — /mcp
+# Mount-এর ভেতরের _AuthASGIMiddleware-এর লগ পর্যন্ত একটাও আসছে না (তিনবার টেস্টে)।
+# সম্ভাবনা দুটো: (১) রিকোয়েস্ট Render/নেটওয়ার্ক লেভেলেই আটকাচ্ছে, অ্যাপ পর্যন্ত
+# পৌঁছাচ্ছে না; (২) পৌঁছাচ্ছে কিন্তু Starlette-এর রাউটার সেটাকে /mcp Mount-এ মেলাতে
+# পারছে না (যেমন প্রক্সি root_path/prefix বদলে দিলে) — সেক্ষেত্রে সেটা নীরব 404,
+# কারণ _AuthASGIMiddleware রাউট-ম্যাচের *ভেতরে* চলে, তাই সেটা স্পর্শই করে না।
+# নিচের মিডলওয়্যারটা চূড়ান্ত ফয়সালা করে: এটা Starlette-এর রাউটিং শুরু হওয়ার *আগে*
+# প্রতিটা HTTP রিকোয়েস্ট লগ করে — তাই লগে [RAWREQ] /mcp এন্ট্রি থাকলে সমস্যা রাউটিং/
+# অ্যাপের ভেতরে, আর পুরোপুরি না থাকলে রিকোয়েস্ট অ্যাপে পৌঁছচ্ছেই না (ইনফ্রা লেভেল)।
+class _RawRequestLogger:
+    """সবচেয়ে বাইরের raw-ASGI লগিং লেয়ার — Starlette রাউটিং শুরুর আগেই প্রতিটা HTTP
+    রিকোয়েস্টের method/path + কিছু হেডার লগ করে। ডায়াগনস্টিক: /mcp রিকোয়েস্ট অ্যাপে
+    আদৌ পৌঁছাচ্ছে কিনা (404 হলেও) নিশ্চিত করতে। কোনো রিকোয়েস্ট ব্লক/পরিবর্তন করে না।
+    """
+
+    def __init__(self, inner_app):
+        self.inner_app = inner_app
+
+    def __getattr__(self, name):
+        # স্বচ্ছ প্রক্সি: uvicorn অ্যাপ অবজেক্টে অ্যাট্রিবিউট-ইন্সপেকশন করতে পারে
+        # (যেমন পুরোনো কিছু ভার্সনে lifespan="auto" সিদ্ধান্ত নেয়
+        # hasattr(app, "add_event_handler") দেখে)। এই লেয়ারের কারণে যদি সেই চেক
+        # বদলে যায়, তাহলে FastMCP-এর session-manager lifespan চালুই হবে আর /mcp
+        # সব রিকোয়েস্টে ব্যর্থ হবে — অর্থাৎ ডায়াগনস্টিক নিজে বাগ বানিয়ে ফেলবে।
+        # তাই এই ক্লাসে না-পাওয়া যেকোনো অ্যাট্রিবিউট ভেতরের অ্যাপে ডিলিগেট করা হয়,
+        # যাতে wrap-এর আগে-পরে uvicorn-এর দৃষ্টিতে অ্যাপ হুবহু একই থাকে।
+        return getattr(self.inner_app, name)
+
+    async def __call__(self, scope, receive, send):
+        # লগিং নিজে কোনোভাবেই রিকোয়েস্ট ভাঙতে পারবে না — তাই সব ডায়াগনস্টিক
+        # লজিক try/except-এ মোড়া; ভেতরের অ্যাপ কলটা সর্বদা একইভাবে হয়।
+        try:
+            if scope.get("type") == "http":
+                path = scope.get("path", "")
+                method = scope.get("method", "")
+                headers = dict(scope.get("headers") or [])
+                content_type = headers.get(b"content-type", b"").decode("latin-1")
+                user_agent = headers.get(b"user-agent", b"").decode("latin-1")[:120]
+                has_auth = b"authorization" in headers
+                logger.warning(
+                    f"[RAWREQ] {method} {path} | content-type={content_type!r} "
+                    f"user-agent={user_agent!r} has_auth_header={has_auth}"
+                )
+                if "mcp" in path.lower():
+                    # /mcp-সংক্রান্ত যেকোনো রিকোয়েস্টে বাড়তি ডিটেইল: root_path/raw_path
+                    # path-এর থেকে আলাদা হলে প্রক্সি পথ বদলে দিচ্ছে (রাউটিং-লেভেল মিসম্যাচ),
+                    # আর পুরোটাই না আসলে রিকোয়েস্ট অ্যাপে পৌঁছাচ্ছেই না (নেটওয়ার্ক-লেভেল)।
+                    header_names = sorted({k.decode("latin-1") for k, _v in (scope.get("headers") or [])})
+                    logger.warning(
+                        f"[RAWREQ][MCP] details: root_path={scope.get('root_path', '')!r} "
+                        f"raw_path={scope.get('raw_path')!r} "
+                        f"query_string={scope.get('query_string', b'').decode('latin-1')!r} "
+                        f"client={scope.get('client')!r} header_names={header_names}"
+                    )
+        except Exception as _diag_exc:  # noqa: BLE001
+            logger.warning(f"[RAWREQ] ডায়াগনস্টিক লগিং ব্যর্থ (উপেক্ষা করা হলো): {type(_diag_exc).__name__}: {_diag_exc}")
+        await self.inner_app(scope, receive, send)
+
+
 def main():
     """সিঙ্ক্রোনাস এন্ট্রি পয়েন্ট — নিচের async ফাংশনটা চালায়।"""
     asyncio.run(run_bot_async())
@@ -18769,6 +18831,15 @@ button{{width:100%;padding:10px;background:#111;color:#fff;border:0;border-radiu
         web_app = Starlette(routes=routes, lifespan=mcp_lifespan)
     else:
         web_app = Starlette(routes=routes)
+
+    # Phase 43-diag: [RAWREQ] ডায়াগনস্টিক লগার — wrapটা web_app বানানোর পুরো লজিকের
+    # (দুটো ব্রাঞ্চই) একদম শেষে, কারণ নিচের uvicorn.Config() ঠিক এই web_app ভ্যারিয়েবলটা
+    # serve করে — তাই এটাই অ্যাপের সবচেয়ে বাইরের লেয়ার। এর ফলে Starlette-এর রাউটার
+    # রুট-ম্যাচিং শুরু করার আগেই প্রতিটা রিকোয়েস্ট লগ হয়, এবং /mcp Mount-এ মেলাতে
+    # না-পেরে 404 হওয়া রিকোয়েস্টগুলোও ([RAWREQ] হিসেবে) দেখা যায়। এটা শুধু লগ করে —
+    # কোনো রিকোয়েস্ট/রেসপন্স ব্লক বা বদলায় না (উপরের ক্লাসের ডকস্ট্রিং দেখুন)।
+    web_app = _RawRequestLogger(web_app)
+    logger.warning("[RAWREQ] ডায়াগনস্টিক গ্লোবাল মিডলওয়্যার সক্রিয় — প্রতিটা HTTP রিকোয়েস্ট লগ হবে")
 
     await app.initialize()
     await app.start()
