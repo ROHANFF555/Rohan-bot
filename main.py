@@ -17616,6 +17616,54 @@ BRAIN_OS_SEED_PATTERNS: List[Dict[str, Any]] = [
      "description": "সব ফিচার/কমান্ডের তালিকা দেখতে /menu অথবা /help লিখুন।"},
     {"pattern_type": "keyword", "match_value": "কমান্ড", "category": "bot_info", "name": "commands_bn", "priority": 7, "confidence_score": 0.8,
      "description": "সব কমান্ডের তালিকা দেখতে /help অথবা /menu লিখুন — বাটন-ভিত্তিক মেনু চলে আসবে।"},
+
+    # ---- Intent (সমার্থক-শব্দভিত্তিক) প্যাটার্ন ----
+    # pattern_type="intent" হলে PatternEngine._score_pattern() মেসেজের টোকেনগুলো
+    # bangla_synonyms.expand_with_synonyms() দিয়ে প্রসারিত করে match_value-র সাথে মেলায়,
+    # তাই "মোট বের করো" আর "যোগ"/"add" একই ইন্টেন্ট হিসেবে ধরা পড়ে। এই এন্ট্রিগুলোই
+    # সেই synonym-matching-কে লাইভ বটে সক্রিয় করে (এর আগে seed-এ শুধু keyword প্যাটার্ন
+    # ছিল, তাই ইন্টেন্ট-কোড কখনো কাজে লাগত না)।
+    #
+    # match_value বেছে নেওয়ার দুটো নিয়ম (matching logic একদম অপরিবর্তিত — শুধু ডেটা):
+    #   ১) প্রতিটা শব্দ bangla_synonyms.SYNONYM_GROUPS-এর সংশ্লিষ্ট গ্রুপ থেকে নেওয়া। গ্রুপের
+    #      যেকোনো একটা শব্দ মেসেজে থাকলে পুরো গ্রুপ প্রসারিত হয়, তাই গ্রুপের যে-শব্দেই
+    #      ইউজার ইন্টেন্টটা প্রকাশ করুক না কেন, একই প্যাটার্ন ম্যাচ করে।
+    #   ২) সংখ্যা-সহ হিসাবের বাক্যে যে ক্রিয়াপদ থাকে (যোগ/বিয়োগ/গুণ/ভাগ) সেগুলো ইচ্ছা করেই
+    #      match_value-তে নেই। কারণ Decision Engine-এর relevance guard
+    #      (_pattern_match_quality_ok) match_value-র কোনো শব্দ টেক্সটে সরাসরি (whole-word)
+    #      পেলে তবেই direct উত্তর দেয় — ফলে "৫ আর ৩ যোগ করো" জাতীয় প্রশ্ন AI-এর কাছেই
+    #      যায় (সে-ই আসল উত্তর "৮" দিতে পারে), আর "মোট বের করো"-র মতো সংখ্যা-ছাড়া
+    #      ইন্টেন্ট-প্রকাশ এই প্যাটার্ন ধরে সরাসরি নির্দেশনা দেয় (অপ্রয়োজনীয় ওয়েব-সার্চ এড়ায়)।
+    #
+    # priority ইচ্ছা করেই কম (৪): seed করা keyword প্যাটার্নগুলোর priority ৬-৭, আর
+    # PatternEngine.match() priority → confidence ক্রমে সাজিয়ে সেরা একটাই ফেরত দেয়। তাই
+    # "কমান্ড দেখাও"-তে আগের মতো commands_bn-ই জেতে; intent প্যাটার্নগুলো তখনই সামনে
+    # আসে যখন অন্য কোনো প্যাটার্ন মেলে না।
+    #
+    # description-ই হলো direct উত্তর (_brain_payload_to_answer() BrainPattern.description
+    # পড়ে) — তাই প্রতিটা উত্তর ইউজারকে বটের আসল সক্ষমতার দিকে পাঠায়: সংখ্যা দিলে হিসাব
+    # (AI), আর প্রোগ্রাম চাইলে /codeproject (bangla_rule_engine-এর deterministic কোড-পথ)।
+    {"pattern_type": "intent", "match_value": "মোট, addition, সাম", "category": "math", "name": "add_numbers", "priority": 4, "confidence_score": 0.9,
+     "description": "🔢 যোগফল/মোট বের করতে চাইলে সংখ্যাগুলোসহ লিখুন — যেমন: ৫ আর ৩ যোগ করো। আমি হিসাব করে দেব।\n"
+                    "আর যোগফল বের করার প্রোগ্রাম বানাতে চাইলে লিখুন: /codeproject দুইটা সংখ্যা ইনপুট নিয়ে যোগফল প্রিন্ট করবে"},
+    {"pattern_type": "intent", "match_value": "minus, subtract", "category": "math", "name": "subtract_numbers", "priority": 4, "confidence_score": 0.9,
+     "description": "➖ বিয়োগ করতে চাইলে সংখ্যাগুলোসহ লিখুন — যেমন: ১০ থেকে ৩ বিয়োগ করো। আমি হিসাব করে দেব।\n"
+                    "আর বিয়োগের প্রোগ্রাম বানাতে চাইলে লিখুন: /codeproject দুইটা সংখ্যা ইনপুট নিয়ে বিয়োগফল প্রিন্ট করবে"},
+    {"pattern_type": "intent", "match_value": "গুনা, multiply", "category": "math", "name": "multiply_numbers", "priority": 4, "confidence_score": 0.9,
+     "description": "✖️ গুণ করতে চাইলে সংখ্যাগুলোসহ লিখুন — যেমন: ৫ আর ৩ গুণ করো। আমি হিসাব করে দেব।\n"
+                    "আর গুণফল বের করার প্রোগ্রাম বানাতে চাইলে লিখুন: /codeproject দুইটা সংখ্যা ইনপুট নিয়ে গুণফল প্রিন্ট করবে"},
+    {"pattern_type": "intent", "match_value": "divide", "category": "math", "name": "divide_numbers", "priority": 4, "confidence_score": 0.9,
+     "description": "➗ ভাগ করতে চাইলে সংখ্যাগুলোসহ লিখুন — যেমন: ২০ কে ৪ দিয়ে ভাগ করো। আমি হিসাব করে দেব।\n"
+                    "আর ভাগফল বের করার প্রোগ্রাম বানাতে চাইলে লিখুন: /codeproject দুইটা সংখ্যা ইনপুট নিয়ে ভাগফল প্রিন্ট করবে"},
+    # print/আউটপুট ইন্টেন্ট — category bot_info, তাই coding-context-এ (CODING_EXCLUDED_BRAIN_CATEGORIES)
+    # এটা আগেই বাদ পড়ে: কোড-জেনারেশনের মাঝে "কী প্রিন্ট করব?" জাতীয় উত্তর চলে যায় না।
+    {"pattern_type": "intent", "match_value": "প্রিন্ট, আউটপুট", "category": "bot_info", "name": "print_output", "priority": 4, "confidence_score": 0.9,
+     "description": "🖨️ কী প্রিন্ট/আউটপুট দেখাতে হবে সেটা লিখুন — টেক্সট, হিসাবের ফলাফল বা ফাইলের তথ্য।\n"
+                    "প্রোগ্রাম দিয়ে প্রিন্ট করাতে চাইলে লিখুন: /codeproject দুইটা সংখ্যা ইনপুট নিয়ে যোগফল প্রিন্ট করবে"},
+    # সাহায্য ইন্টেন্ট — বিদ্যমান help_en keyword প্যাটার্নের বাংলা সমতুল (সাহায্য/হেল্প)।
+    {"pattern_type": "intent", "match_value": "সাহায্য, হেল্প, help", "category": "bot_info", "name": "help_support", "priority": 4, "confidence_score": 0.9,
+     "description": "🆘 সাহায্য দরকার? সব কমান্ডের তালিকা পেতে /help অথবা /menu লিখুন।\n"
+                    "সরাসরি প্রশ্ন লিখলেও উত্তর দেব, আর প্রোগ্রাম বানাতে চাইলে /codeproject লিখুন।"},
 ]
 
 
@@ -17623,6 +17671,8 @@ def seed_brain_os_defaults() -> None:
     """
     বট চালু হওয়ার সময় একবার কল হয়। উপরের তালিকার সাধারণ Q&A/Pattern Brain OS-এ ঢোকায়,
     যাতে Decision Engine এইসব সাধারণ প্রশ্নের জন্য AI না ডেকেই সরাসরি উত্তর দিতে পারে।
+    প্যাটার্নগুলোর মধ্যে keyword (হুবহু শব্দ) আর intent (bangla_synonyms-এর সমার্থক গ্রুপ
+    দিয়ে প্রসারিত ইন্টেন্ট — যেমন "মোট বের করো" = "যোগ") দুই ধরনের এন্ট্রিই আছে।
     সম্পূর্ণ non-fatal — কোনো এন্ট্রি ব্যর্থ হলেও বট চালু হতে বাধা দেয় না।
     """
     try:
