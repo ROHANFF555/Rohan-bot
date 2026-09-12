@@ -322,7 +322,7 @@ from urllib.parse import urlencode as _url_encode  # Phase 43: OAuth redirect UR
 from urllib.parse import parse_qs  # Phase 43: ASGI middleware-এ query string থেকে token পড়তে
 
 # ---- Bangla Rule Engine (নিয়ম-ভিত্তিক বাংলা→Python deterministic ট্রান্সলেটর) ----
-# আলাদা মডিউল bangla_rule_engine.py-তে (ভেরিয়েবল/ইনপুট/শর্ত/নিষেধ/আউটপুট/তুলনা রুল)।
+# আলাদা মডিউল bangla_rule_engine.py-তে (ভেরিয়েবল/ইনপুট/শর্ত/নিষেধ/আউটপুট/তুলনা + loop রুল)।
 # টেস্ট-স্যান্ডবক্সে main.py কে একা টেম্প-ডিরেক্টরিতে কপি করা হলে (tests/test_dynamic_print_kb.py
 # -এর মতো) মডিউলটি sys.path-এ নাও থাকতে পারে — তখন ইঞ্জিন নিঃশব্দে বন্ধ থাকে
 # (ম্যাচ=None → আগের ফ্লো অক্ষত), কোনো এররে বট ভাঙে না।
@@ -12079,7 +12079,7 @@ def match_bangla_rule_task(title: str, description: str, stack: str = "") -> Opt
     Engine → AI) ফলব্যাক করে।
 
     ইঞ্জিনটি bangla_rule_engine.py-তে: কড়া, নির্দিষ্ট ফরম্যাটের বাংলা নির্দেশনা
-    (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা) AI ছাড়াই চালানোর-যোগ্য
+    (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা, loop/for-range) AI ছাড়াই চালানোর-যোগ্য
     Python কোডে অনুবাদ করে। ইঞ্জিনের ভেতরের গার্ড dynamic-print-আকৃতির
     ("রান করলে X লেখা আসবে") বা কোটেশন-যুক্ত টেক্সট আগেই বাদ দেয়, তাই এই
     ম্যাচার dynamic_print-এর পরিপূরক — তার কাজ কেড়ে নেয় না।
@@ -12164,7 +12164,8 @@ async def coding_analyze_and_plan(raw_request: str, user_id: int) -> dict:
     ফলব্যাক করা হয়।
 
     No API Call Mode গার্ড: AI কলের আগেই deterministic ম্যাচ চেষ্টা হয় — প্রথমে
-    বাংলা রুল ইঞ্জিন (bangla_rule_engine: কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা),
+    বাংলা রুল ইঞ্জিন (bangla_rule_engine: কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা,
+    loop/for-range সহ),
     তারপর dynamic-print ("রান করলে <বার্তা> লেখা আসবে") — দুটোই AI ছাড়াই একটাই
     সঠিক ধাপে resolve হয় (ask_ai কোনোভাবেই ডাকা হয় না)। কিছু না মিললে /codeplan-এর
     মতোই single-task fallback প্ল্যান (no_api_blocked চিহ্নসহ) ফেরত যায়, আর
@@ -12175,7 +12176,7 @@ async def coding_analyze_and_plan(raw_request: str, user_id: int) -> dict:
     # (সবগুলো পথেই AI কল নেই)।
     if is_no_api_mode(user_id):
         # ১. Deterministic বাংলা রুল ইঞ্জিন (bangla_rule_engine) ম্যাচ চেষ্টা —
-        # কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা (স্টোরেজ/ইনপুট/শর্ত/আউটপুট) আগে
+        # কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা (স্টোরেজ/ইনপুট/শর্ত/আউটপুট/loop) আগে
         # দেখা হয়; ইঞ্জিন-গার্ড dynamic-print-আকৃতির টেক্সট বাদ দিয়ে দেয়, তাই
         # না মিললে পরের ধাপে dynamic-print নিজের মতোই কাজ করে।
         try:
@@ -13802,7 +13803,7 @@ async def process_next_code_task(project: dict):
         return task
 
     # বাংলা রুল ইঞ্জিন (bangla_rule_engine): কড়া, নির্দিষ্ট ফরম্যাটের বাংলা নির্দেশনা
-    # (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা) deterministicভাবে চালানোর-
+    # (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা, loop/for-range) deterministicভাবে চালানোর-
     # যোগ্য Python কোডে অনুবাদ করে — AI ছাড়াই। dynamic_print-এর আগে চেষ্টা হয়
     # (matcher চেইনে নতুন এন্ট্রি), কিন্তু ইঞ্জিনের ভেতরের গার্ড dynamic-print-আকৃতির
     # ("রান করলে X লেখা আসবে") বা কোটেশন-যুক্ত টেক্সট আগেই বাদ দেয় — তাই পুরনো

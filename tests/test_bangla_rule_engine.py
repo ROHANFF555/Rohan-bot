@@ -11,6 +11,14 @@
      প্রসঙ্গ), negation সহ কেস ("... দেখাবে না" → ওই অংশ জেনারেট হয় না), "X এবং Y
      মিললে" পরস্পর-তুলনা, "না মিললে" else-বার্তা।
 
+  1ক. **loop (for-range) রুল** — "<N> বার <বার্তা> {দেখাবে|লিখবে|প্রিন্ট করবে}" →
+     `for i in range(N): print("বার্তা")`, আর "<A> থেকে <B> পর্যন্ত সংখ্যা
+     {দেখাবে|প্রিন্ট করবে}" → `for i in range(A, B + 1): print(i)`। জেনারেট হওয়া
+     কোড সত্যিই চালিয়ে ঠিক সংখ্যক লাইন/ক্রম যাচাই হয়; বাংলা ও ASCII অঙ্ক একই
+     কোড দেয়; MAX_LOOP_COUNT-এর বেশি সংখ্যা (বা উল্টো পরিসর) দিলে None (AI
+     ফলব্যাক); loop + if-শর্ত মিশ্র কেস ও while-আকৃতির ("যতক্ষণ ... ততক্ষণ")
+     টেক্সটও None — স্কোপের বাইরে।
+
   2. **গার্ড (false-positive প্রতিরোধ)** — মুক্ত বাংলা, ইংরেজি, UI/ফিচার-বর্ণনা,
      কোটেশন-যুক্ত, dynamic-print-আকৃতি ("রান করলে ... লেখা আসবে"), অন্য ভাষার নাম
      (জাভা/জাভাস্ক্রিপ্ট...), খালি/অতিদীর্ঘ টেক্সটে ইঞ্জিন ফায়ার করে না (None) —
@@ -195,6 +203,128 @@ class BanglaRuleEngineUnitTests(unittest.TestCase):
         r = run_python_code(code, "10\n", self.workdir, "digits")
         self.assertEqual(r.returncode, 0)
         self.assertIn("সঠিক", r.stdout)
+
+    # -- loop: নির্দিষ্ট সংখ্যক বার (for-range, ধরন ১ক) -------------------------
+    def test_loop_fixed_count(self):
+        code = self._translate("৫ বার হ্যালো লিখবে")
+        self.assertIn("for i in range(5):", code)
+        self.assertIn('print("হ্যালো")', code)
+        self.assertNotIn("input(", code)
+        r = run_python_code(code, "", self.workdir, "loop_count")
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        self.assertEqual(lines, ["হ্যালো"] * 5)  # ঠিক ৫ বার — কম/বেশি নয়
+
+    # -- loop: পরিসর (for-range, ধরন ১খ) --------------------------------------
+    def test_loop_range(self):
+        code = self._translate("১ থেকে ৫ পর্যন্ত সংখ্যা দেখাবে")
+        self.assertIn("for i in range(1, 6):", code)  # B + 1 (৫ সহ)
+        self.assertIn("print(i)", code)
+        r = run_python_code(code, "", self.workdir, "loop_range")
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        self.assertEqual(lines, ["1", "2", "3", "4", "5"])
+        # প্রতিটা সংখ্যা আলাদা লাইনে — বাংলা অঙ্ক নয়, ASCII অঙ্ক
+        for expected in ("1", "2", "3", "4", "5"):
+            self.assertIn(expected, lines)
+
+    # -- loop: বাংলা অঙ্ক = ASCII অঙ্ক (একই কোড, একই আউটপুট) -------------------
+    def test_loop_bangla_digits(self):
+        bn_count = self._translate("৫ বার হ্যালো লিখবে")
+        ascii_count = self._translate("5 বার হ্যালো লিখবে")
+        self.assertEqual(bn_count, ascii_count)
+        self.assertIn("for i in range(5):", bn_count)  # বাংলা ৫ → ASCII 5
+        self.assertNotIn("৫", bn_count)
+
+        bn_range = self._translate("১ থেকে ১০ পর্যন্ত সংখ্যা দেখাবে")
+        ascii_range = self._translate("1 থেকে 10 পর্যন্ত সংখ্যা দেখাবে")
+        self.assertEqual(bn_range, ascii_range)
+        r_bn = run_python_code(bn_range, "", self.workdir, "loop_bn_digits")
+        r_ascii = run_python_code(ascii_range, "", self.workdir, "loop_ascii_digits")
+        self.assertEqual(r_bn.returncode, 0, r_bn.stderr[:300])
+        self.assertEqual(r_bn.stdout, r_ascii.stdout)
+        self.assertEqual(
+            [ln.strip() for ln in r_bn.stdout.splitlines() if ln.strip()],
+            [str(n) for n in range(1, 11)],
+        )
+
+    # -- loop: গার্ড — অস্বাভাবিক বড় সংখ্যা → None (AI ফলব্যাক) ----------------
+    def test_loop_guard_excessive_count(self):
+        self.assertIsNone(bre.translate_bangla_rules("১০০০০০০ বার হ্যালো লিখবে"))
+        self.assertIsNone(bre.translate_bangla_rules("1000000 বার হ্যালো লিখবে"))
+        self.assertIsNone(bre.translate_bangla_rules("১ থেকে ১০০০০০ পর্যন্ত সংখ্যা দেখাবে"))
+        # সীমানা: ঠিক MAX_LOOP_COUNT পর্যন্ত এখনো কাজ করে
+        code = self._translate(f"{bre.MAX_LOOP_COUNT} বার হ্যালো লিখবে")
+        self.assertIn(f"for i in range({bre.MAX_LOOP_COUNT}):", code)
+        r = run_python_code(code, "", self.workdir, "loop_max")
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        self.assertEqual(len([ln for ln in r.stdout.splitlines() if ln.strip()]),
+                         bre.MAX_LOOP_COUNT)
+
+    # -- loop: গার্ড ও মিশ্র কেস যেগুলো ইঞ্জিনের স্কোপে নেই → None -------------
+    def test_loop_out_of_scope_shapes_return_none(self):
+        must_none = (
+            # loop + if-শর্ত (এই ধাপের স্কোপে নেই — AI ফলব্যাক, raise নয়)
+            "১ থেকে ১০ পর্যন্ত সংখ্যা দেখাবে যদি জোড় হয় তাহলে জোড় দেখাবে",
+            "যদি নাম রহিম হলে তাহলে ৩ বার স্বাগত দেখাবে",
+            # while/শর্তসাপেক্ষ পুনরাবৃত্তি (পরের ধাপ)
+            "যতক্ষণ না সঠিক হয় ততক্ষণ ইনপুট চাইবে",
+            "নাম না মেলা পর্যন্ত আবার জিজ্ঞাসা করবে",
+            "বারবার নাম চাইবে",
+            # একই রিকোয়েস্টে দুই loop
+            "১ থেকে ৫ পর্যন্ত সংখ্যা দেখাবে আর ১০ বার হ্যালো লিখবে",
+            # loop-এর বাইরে আরেকটা আউটপুট-নির্দেশ (মিশ্র)
+            "৫ বার হ্যালো লিখবে এবং বিদায় দেখাবে",
+            # কড়া ফরম্যাট নয় / অসম্ভব পরিসর
+            "০ বার হ্যালো লিখবে",
+            "১০ থেকে ১ পর্যন্ত সংখ্যা দেখাবে",
+            "৫ বার হ্যালো বলবে",
+            "হ্যালো ৫ বার লিখবে",
+            # নিষেধ করা loop
+            "৫ বার হ্যালো লিখবে না",
+            # গার্ড: dynamic-print আকৃতি / কোটেশন / UI / অন্য ভাষা
+            "রান করলে ৫ বার হ্যালো লেখা আসবে",
+            'প্রোগ্রাম "হ্যালো" ৫ বার প্রিন্ট করবে',
+            "ড্যাশবোর্ডে ১০ বার প্রোফাইল দেখাবে",
+            "জাভাস্ক্রিপ্টে ৫ বার হ্যালো লিখবে",
+        )
+        for text in must_none:
+            with self.subTest(text=text[:40]):
+                self.assertIsNone(bre.translate_bangla_rules(text))
+
+    # -- রিগ্রেশন: loop রুল যোগ হওয়ায় বিদ্যমান রুলগুলো বদলায়নি -----------------
+    def test_loop_does_not_break_existing_rules(self):
+        # if/storage ফ্যামিলি (LOGIN_REQUEST) আগের মতোই — কোনো loop ঢুকে পড়ে না
+        code = self._translate(LOGIN_REQUEST)
+        self.assertNotIn("for i in range(", code)
+        self.assertIn("database = {", code)
+        self.assertEqual(code.count("input("), 2)
+        self.assertIn('password == database["password"]', code)
+        self.assertIn('print("সাকসেস")', code)
+        r_ok = run_python_code(code, "admin123\nadmin\n", self.workdir, "regress_login_ok")
+        self.assertEqual(r_ok.returncode, 0, r_ok.stderr[:300])
+        self.assertIn("সাকসেস", r_ok.stdout)
+        r_bad = run_python_code(code, "admin123\nwrong\n", self.workdir, "regress_login_bad")
+        self.assertEqual(r_bad.returncode, 0)
+        self.assertIn("ব্যর্থ", r_bad.stdout)
+
+        # print-only ফ্যামিলি আগের মতোই একবার প্রিন্ট করে (loop নয়)
+        print_only = self._translate("প্রোগ্রামটা কনসোলে হ্যালো ওয়ার্ল্ড লিখবে")
+        self.assertNotIn("for i in range(", print_only)
+        r_print = run_python_code(print_only, "", self.workdir, "regress_print_only")
+        self.assertEqual(r_print.returncode, 0)
+        self.assertEqual([ln for ln in r_print.stdout.splitlines() if ln.strip()],
+                         ["হ্যালো ওয়ার্ল্ড"])
+
+        # literal-if কেস আগের মতোই
+        if_code = self._translate("যদি নাম রহিম হলে তাহলে স্বাগতম দেখাবে")
+        self.assertIn('if name == "রহিম":', if_code)
+        r_if = run_python_code(if_code, "রহিম\n", self.workdir, "regress_if")
+        self.assertEqual(r_if.returncode, 0)
+        self.assertIn("স্বাগতম", r_if.stdout)
+
+        # fizzbuzz-জাতীয় "X পর্যন্ত লেখো" টেক্সট এখনো ইঞ্জিনের নয় (fixed KB-র ডোমেইন)
+        self.assertIsNone(bre.translate_bangla_rules("fizzbuzz ২০ পর্যন্ত লেখো"))
 
     # -- গার্ড: এই ইঞ্জিনের নয় এমন ইনপুট → None (AI ফলব্যাক) -------------------
     def test_non_strict_inputs_return_none(self):
@@ -393,6 +523,36 @@ class BanglaRuleEngineIntegrationTests(unittest.TestCase):
         self.assertIn("input(", reply)                   # আসল কোড ফেরত এসেছে
         self.assertIn("সাকসেস", reply)
         ask_ai.assert_not_awaited()
+
+    # -- loop-টাস্কও No API Mode-এ AI ছাড়াই resolve হয় ------------------------
+    def test_loop_task_resolves_without_ai(self):
+        """loop-রুল এখন matcher চেইনে: "৫ বার হ্যালো লিখবে" টাস্ক No API Mode-এও
+        knowledge_base:bangla_rule_engine থেকেই আসে, কোনো AI কল ছাড়াই।"""
+        loop_request = "৫ বার হ্যালো লিখবে"
+        self.assertIsNotNone(self.main._match_bangla_rule_request(loop_request))
+        label, code, language = self.main._match_bangla_rule_request(loop_request)
+        self.assertEqual(label, "bangla_rule_engine")
+        self.assertEqual(language, "python")
+        self.assertIn("for i in range(5):", code)
+
+        pid = self.main.create_code_project(
+            USER_ID_NOAPI, "লুপ ডেমো", loop_request, "python",
+            [{"title": "লুপ ধাপ", "description": loop_request}],
+        )
+        project = self.main.get_project(pid, owner_id=USER_ID_NOAPI)
+        ask_patch, engine_patch, fake_engine = self._patch_ai()
+        with ask_patch as ask_ai, engine_patch:
+            result = asyncio.run(self.main.process_next_code_task(project))
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(result["source"], "knowledge_base:bangla_rule_engine")
+        self.assertIn("for i in range(5):", result["code"])
+        ask_ai.assert_not_awaited()
+        fake_engine.execute_async.assert_not_awaited()
+        # জেনারেট হওয়া কোড সত্যিই চলে — ৫ লাইন "হ্যালো"
+        r = run_python_code(result["code"], "", self.workdir, "int_loop")
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        self.assertEqual([ln for ln in r.stdout.splitlines() if ln.strip()],
+                         ["হ্যালো"] * 5)
 
     # -- পরিপূরকতা: পুরনো dynamic-print matcher অক্ষত -------------------------
     def test_dynamic_print_task_not_stolen_by_rule_engine(self):

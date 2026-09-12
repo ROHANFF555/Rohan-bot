@@ -20,9 +20,17 @@ v1 রুলস (প্রতিটা রুল = ট্রিগার-প্�
      আউটপুট-ট্রিগার তখনই যথেষ্ট যখন কনসোল-প্রসঙ্গ ("কনসোলে ... লিখবে") বা
      প্রোগ্রাম-সাবজেক্ট + "প্রিন্ট করবে" আছে — নইলে structured রুল লাগে।
   6. তুলনা রুল — "মিললে"/"সমান হলে" → == (নিষেধ হলে !=) তুলনা
+  7. loop রুল (for-range) — নির্দিষ্ট-সংখ্যক পুনরাবৃত্তি:
+       • "<N> বার <বার্তা> {দেখাবে|লিখবে|প্রিন্ট করবে}" → for i in range(N): print("বার্তা")
+       • "<A> থেকে <B> পর্যন্ত [সংখ্যা] {দেখাবে|প্রিন্ট করবে}" → for i in range(A, B + 1): print(i)
+     N/পরিসরের আকার MAX_LOOP_COUNT (১০,০০০)-এর মধ্যে থাকতে হয়, নইলে None।
+     loop + if-শর্ত (বা ইনপুট/স্টোরেজ) একসাথে থাকলে সেটাও None — মিশ্র কেস এই
+     ফ্যামিলির স্কোপে নেই, কলার AI-তে ফলব্যাক করে (raise নয়)।
 
-স্কোপে নেই (পরের ধাপ): loop (for/while), একাধিক ফাংশন/ক্লাস, try/except,
-মুক্ত/স্বাভাবিক বাংলা — এটা শুধু কড়া, নির্দিষ্ট ফরম্যাটের ইনপুটের জন্য।
+স্কোপে নেই (পরের ধাপ): while-লুপ/শর্তসাপেক্ষ পুনরাবৃত্তি ("যতক্ষণ ... ততক্ষণ"),
+একাধিক ফাংশন/ক্লাস, try/except, মুক্ত/স্বাভাবিক বাংলা — এটা শুধু কড়া,
+নির্দিষ্ট ফরম্যাটের ইনপুটের জন্য। while-আকৃতির টেক্সট পেলে ইঞ্জিন
+নীরবে None দেয় (ভুল while/if কোড বানানোর বদলে AI ফলব্যাক)।
 
 কোনো রুল-সেটই পূর্ণ প্রোগ্রাম দাঁড়াতে না পারলে (বা জেনারেট হওয়া কোড
 ast.parse-এ বৈধ না হলে) None রিটার্ন হয় — কলার তখন পুরনো ফ্লো
@@ -46,6 +54,7 @@ ENGINE_LABEL = "bangla_rule_engine"
 
 MAX_INPUT_CHARS = 600        # এর চেয়ে দীর্ঘ রিকোয়েস্ট কড়া-ফরম্যাটের নয় → অমিল
 MAX_ITEMS = 8                # ইনপুট/ফিল্ড/আউটপুট-এর সর্বোচ্চ সংখ্যা
+MAX_LOOP_COUNT = 10_000      # loop-এর সর্বোচ্চ পুনরাবৃত্তি — এর বেশি হলে None (AI ফলব্যাক)
 DEFAULT_FAILURE_MESSAGE = "ব্যর্থ হয়েছে"
 DEFAULT_UNKNOWN_VALUE = "admin"
 
@@ -218,6 +227,31 @@ _MATCH_FIELDS_RE = _rx(
 _OUTPUT_RE = _rx(
     r"([^\s।,.]+(?:\s+[^\s।,.]+){0,2})\s+"
     r"(দেখাবে|দেখাক|লিখবে|প্রিন্ট\s+করবে|প্রিন্ট\s+করো|প্রিন্ট\s+করে)"
+)
+
+# ৭) loop রুল (for-range) — নির্দিষ্ট-সংখ্যক পুনরাবৃত্তি। ক্রিয়া-তালিকা আউটপুট রুলেরই
+# মতো, তাই "দেখাবে/লিখবে"-ভাষার নির্দেশই ধরা পড়ে ("নাচবে/ঘুরবে" জাতীয় কিছু নয়)।
+_LOOP_VERB_PAT = (
+    r"(?:দেখাবে|দেখাক|দেখাবেন|লিখবে|লিখবেন|প্রিন্ট\s+করবে|প্রিন্ট\s+করো|প্রিন্ট\s+করে)"
+)
+# ধরন ১ক: "<N> বার <বার্তা> {দেখাবে|লিখবে|প্রিন্ট করবে}"
+_LOOP_COUNT_RE = _rx(
+    r"([0-9]+)\s*বার\s+([^\s।,.]+(?:\s+[^\s।,.]+){0,3}?)\s+" + _LOOP_VERB_PAT
+)
+# ধরন ১খ: "<A> থেকে <B> পর্যন্ত [সংখ্যা] {দেখাবে|প্রিন্ট করবে}"
+_LOOP_RANGE_RE = _rx(
+    r"([0-9]+)\s*থেকে\s+([0-9]+)\s*পর্যন্ত\s+"
+    r"(?:(?:সংখ্যা|নম্বর|নাম্বার)(?:গুলো|গুলি)?\s+)?" + _LOOP_VERB_PAT
+)
+# শর্তসাপেক্ষ/অসীম পুনরাবৃত্তি (while) — v1 ইঞ্জিনের স্কোপে নেই; এই-আকৃতির টেক্সট
+# পেলে ভুল while/if কোড বানানোর বদলে None (AI ফলব্যাক)।
+_WHILE_LOOP_RE = _rx(
+    r"যতক্ষণ|ততক্ষণ|পুনরাবৃত্তি|বারবার|বারে\s*বার|অসীম\s*(?:লুপ|বার)|\bwhile\b|\buntil\b"
+)
+# loop-আকৃতির (কিন্তু কড়া ফরম্যাটে পার্স-অযোগ্য) টেক্সট শনাক্ত — "৫ বার" জাতীয়
+# নির্দেশ অন্য ফ্যামিলি ভুলভাবে প্রিন্ট-কোড বানিয়ে না দেয়, None-এ যায়।
+_LOOP_HINT_RE = _rx(
+    r"[0-9]+\s*বার(?![\u0980-\u09ff])|থেকে\s+[0-9]+\s+পর্যন্ত"
 )
 
 # ৪) নিষেধ/negation (প্রি-প্রসেসিং) — ক্রিয়ার পরে "না"
@@ -466,8 +500,69 @@ def _match_outputs(t: str, neg_spans: List[Tuple[int, int]],
             "negated": _overlap_any(verb_span, neg_spans),
             # else-মার্কারের ("না মিললে") পরের ক্রিয়া = else-বার্তা
             "is_else": any(marker_end <= verb_span[0] for _, marker_end in else_spans),
+            # loop-রুল ব্যবহার করে: এই ক্রিয়াটা loop-স্প্যানের ভেতরে কি না
+            "verb_span": verb_span,
         })
     return outputs[:MAX_ITEMS]
+
+
+def _match_loop(t: str, neg_spans: List[Tuple[int, int]],
+                outputs: List[dict]) -> Tuple[Optional[dict], bool]:
+    """loop-রুল ম্যাচ → (facts["loop"], blocked)।
+
+    `blocked=True` মানে: টেক্সট loop-আকৃতির, কিন্তু এই ইঞ্জিন নিরাপদে সেটা
+    জেনারেট করতে পারে না (while-আকৃতি, দুই loop একসাথে, loop+if/ইনপুট/স্টোরেজ,
+    সীমার বাইরের সংখ্যা...) — কলার তখন অন্য ফ্যামিলিতে ভুল কোড না বানিয়ে
+    None (AI ফলব্যাক) পায়।
+    """
+    # while/শর্তসাপেক্ষ পুনরাবৃত্তি — স্কোপে নেই, তাই স্পষ্টভাবে বাদ
+    if _WHILE_LOOP_RE.search(t):
+        return None, True
+
+    count_m = _LOOP_COUNT_RE.search(t)
+    range_m = _LOOP_RANGE_RE.search(t)
+    if count_m and range_m:
+        return None, True  # একই রিকোয়েস্টে দুই রকম loop — মিশ্র কেস
+    match = count_m or range_m
+    if match is None:
+        # loop-আকৃতির কিন্তু কড়া ফরম্যাটে নয় — অন্য ফ্যামিলিও যেন না বানায়
+        return None, bool(_LOOP_HINT_RE.search(t))
+
+    span = (match.start(), match.end())
+    if _overlap_any(span, neg_spans):
+        return None, True  # "৫ বার হ্যালো লিখবে না" — নিষেধ করা loop
+
+    # loop-স্প্যানের বাইরে আরেকটা আউটপুট-ক্রিয়া = loop + অন্য নির্দেশ (মিশ্র কেস)
+    for out in outputs:
+        if out["negated"]:
+            continue
+        v0, v1 = out["verb_span"]
+        if not (span[0] <= v0 and v1 <= span[1]):
+            return None, True
+
+    if count_m:
+        digits = count_m.group(1)
+        if len(digits) > 9:  # absurd সংখ্যা — int() করার আগেই বাদ
+            return None, True
+        count = int(digits)
+        captured = count_m.group(2)
+        message = _clean_phrase(captured, max_len=80)
+        # সীমানা-শব্দে কাটা পড়া বার্তা ("... চেক করবে এবং সাকসেস") = কড়া ফরম্যাট নয়
+        if not message or message != captured.strip():
+            return None, True
+        if any(ch in message for ch in "(){};<>`"):
+            return None, True
+        if not 1 <= count <= MAX_LOOP_COUNT:
+            return None, True
+        return {"kind": "count", "count": count, "message": message}, False
+
+    start_digits, end_digits = range_m.group(1), range_m.group(2)
+    if len(start_digits) > 9 or len(end_digits) > 9:
+        return None, True
+    start, end = int(start_digits), int(end_digits)
+    if start > end or start < 0 or (end - start + 1) > MAX_LOOP_COUNT:
+        return None, True
+    return {"kind": "range", "start": start, "end": end}, False
 
 
 def _parse(text: str) -> Optional[dict]:
@@ -492,12 +587,16 @@ def _parse(text: str) -> Optional[dict]:
     outputs = _match_outputs(t, neg_spans, else_spans)
     if len(inputs) > MAX_ITEMS or len(outputs) > MAX_ITEMS:
         return None
+    loop, loop_blocked = _match_loop(t, neg_spans, outputs)
+    if loop_blocked:
+        return None  # loop-আকৃতির কিন্তু নিরাপদে জেনারেট করা যায় না → AI ফলব্যাক
     return {
         "container": container,
         "storage_fields": storage_fields,
         "inputs": inputs,
         "condition": condition,
         "outputs": outputs,
+        "loop": loop,
         "console": bool(_CONSOLE_RE.search(t)),
         "program_subject": bool(_PROGRAM_SUBJECT_RE.search(t)),
         "print_verb": bool(_PRINT_VERB_RE.search(t)),
@@ -628,7 +727,41 @@ def _assemble_print(success_msgs: List[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _assemble_loop(facts: dict) -> Optional[str]:
+    """loop-ফ্যামিলি: `for i in range(...): print(...)`।
+
+    শুধু loop-only কেস (কোনো if-শর্ত/ইনপুট/স্টোরেজ নেই) এখানে আসে; মিশ্র
+    কেস হলে None — _parse()-এর `_match_loop()` blocked-চেক আর এখানকার
+    গার্ড — দুই জায়গাতেই ধরার চেষ্টা হয়, যাতে ভুল কোড কখনো জেনারেট না হয়।
+    """
+    loop = facts.get("loop")
+    if not loop:
+        return None
+    if (facts.get("condition") is not None or facts.get("inputs")
+            or facts.get("storage_fields") or facts.get("container")):
+        return None  # loop + if/ইনপুট/স্টোরেজ — এই ফ্যামিলির স্কোপে নেই → AI ফলব্যাক
+
+    lines = [_HEADER, ""]
+    if loop["kind"] == "count":
+        count = loop["count"]
+        lines.append(f"# {count} বার পুনরাবৃত্তি (deterministic loop রুল)")
+        lines.append(f"for i in range({count}):")
+        lines.append(f"    print({_dq(loop['message'])})")
+    elif loop["kind"] == "range":
+        start, end = loop["start"], loop["end"]
+        lines.append(f"# {start} থেকে {end} পর্যন্ত সংখ্যা (deterministic loop রুল)")
+        lines.append(f"for i in range({start}, {end + 1}):")
+        lines.append("    print(i)")
+    else:
+        return None
+    return "\n".join(lines) + "\n"
+
+
 def _assemble(facts: dict) -> Optional[str]:
+    # ফ্যামিলি ৩ (loop): নির্দিষ্ট-সংখ্যক পুনরাবৃত্তি (for-range) — loop-only কেস
+    if facts.get("loop") is not None:
+        return _assemble_loop(facts)
+
     ok_outputs = [o for o in facts["outputs"] if not o["negated"]]
     success_msgs = [o["message"] for o in ok_outputs if not o["is_else"]]
     else_candidates = [o["message"] for o in ok_outputs if o["is_else"]]
