@@ -12,9 +12,11 @@ main.py একক-file application হওয়ায় test-টি সেট�
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -64,6 +66,64 @@ class NoApiCodingGuardTests(unittest.TestCase):
         self.assertTrue(plan["no_api_blocked"])
         self.assertEqual(plan["tasks"][0]["title"], "No API Mode চালু আছে")
 
+    def test_codeproject_plan_does_not_call_ai_in_no_api_mode(self):
+        # /codeproject-এর প্ল্যানার (coding_analyze_and_plan) — /codeplan-এর মতোই
+        # No API Mode-এ ask_ai কল করার আগেই deterministic/blocked ফলাফলে থামবে।
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(
+                    "একটি অচেনা inventory analytics app বানাও", USER_ID
+                )
+                ask_ai.assert_not_awaited()
+                return plan
+
+        plan = asyncio.run(run())
+        self.assertTrue(plan["no_api_blocked"])
+        self.assertEqual(plan["stack"], "unknown")
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(plan["tasks"][0]["title"], "No API Mode চালু আছে")
+
+    def test_codeproject_dynamic_print_resolves_without_ai(self):
+        # এক্স্যাক্ট repro: "রান করলে ... লেখা আসবে" ধরনের এক-লাইনের রিকোয়েস্ট No API
+        # Mode-এও /codeproject প্ল্যানার + process_next_code_task() দিয়ে AI ছাড়াই
+        # একটাই সঠিক ধাপে resolve হবে — কোডে "সফল হয়েছে" প্রিন্ট থাকবে।
+        raw_request = "একটি কোড লেখ যেটা রান করলে সফল হয়েছে লেখা আসবে"
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(raw_request, USER_ID)
+                ask_ai.assert_not_awaited()
+                project_id = self.main.create_code_project(
+                    USER_ID, plan["project_name"], raw_request, plan["stack"], plan["tasks"]
+                )
+                project = self.main.get_project(project_id, owner_id=USER_ID)
+                result = await self.main.process_next_code_task(project)
+                return plan, project_id, result, ask_ai
+
+        plan, project_id, result, ask_ai = asyncio.run(run())
+        self.assertFalse(plan.get("no_api_blocked"))
+        self.assertTrue(plan.get("deterministic"))
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(result["status"], "done")
+        self.assertTrue(result["source"].startswith("knowledge_base:"))
+        ask_ai.assert_not_awaited()
+        # জেনারেট হওয়া কোডে বার্তাটা সত্যিই আছে
+        self.assertIn("সফল হয়েছে", result["code"])
+        # ডাটাবেসেও done হিসেবে সেভ হয়েছে
+        saved = self.main.get_project_tasks(project_id)
+        self.assertEqual(saved[0]["status"], "done")
+        self.assertTrue(saved[0]["source"].startswith("knowledge_base:"))
+        # ধরা পড়া ভাষার সিনট্যাক্সে কোডটা সত্যিই বার্তাটা প্রিন্ট করে
+        lang = self.main._detect_dynamic_print_language(plan["stack"])
+        self.assertTrue(lang)
+        if lang == "python":
+            ast.parse(result["code"])
+            run_result = subprocess.run(
+                [sys.executable, "-c", result["code"]], capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(run_result.returncode, 0, run_result.stderr[:300])
+            self.assertIn("সফল হয়েছে", run_result.stdout)
+
     def test_legacy_task_fallback_does_not_call_ai(self):
         project_id = self.main.create_code_project(
             USER_ID,
@@ -110,6 +170,79 @@ class NoApiCodingGuardTests(unittest.TestCase):
         result = asyncio.run(run())
         self.assertTrue(result["no_api_blocked"])
         self.assertEqual(result["status"], "failed")
+
+    def test_codeproject_uses_fixed_kb_before_blocking(self):
+        raw_request = "একটি ক্যালকুলেটর তৈরি কর"
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(raw_request, USER_ID)
+                ask_ai.assert_not_awaited()
+                self.assertFalse(plan.get("no_api_blocked"))
+                project_id = self.main.create_code_project(
+                    USER_ID, plan["project_name"], raw_request, plan["stack"], plan["tasks"]
+                )
+                project = self.main.get_project(project_id, owner_id=USER_ID)
+                result = await self.main.process_next_code_task(project)
+                ask_ai.assert_not_awaited()
+                return plan, result
+
+        plan, result = asyncio.run(run())
+        self.assertEqual(result["status"], "done")
+        self.assertIn("def calculate(", result["code"])
+        self.assertTrue(result["source"].startswith("knowledge_base:"))
+
+    def test_codeproject_novel_request_still_blocks(self):
+        raw_request = "একটি সুন্দর রান-গেম যেখানে একজন মানুষ সামনের দিকে দৌড়াবে"
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                plan = await self.main.coding_analyze_and_plan(raw_request, USER_ID)
+                ask_ai.assert_not_awaited()
+                return plan
+
+        plan = asyncio.run(run())
+        self.assertTrue(plan.get("no_api_blocked"))
+
+    def test_codeproject_handles_edited_message_update(self):
+        class FakeUser:
+            def __init__(self, user_id: int):
+                self.id = user_id
+
+        class FakeEditedMessage:
+            def __init__(self, user_id: int):
+                self.from_user = FakeUser(user_id)
+                self.replies: list[str] = []
+
+            async def reply_text(self, text: str, **kwargs):
+                self.replies.append(text)
+                sent_msg = AsyncMock()
+                sent_msg.delete = AsyncMock()
+                return sent_msg
+
+        class FakeUpdate:
+            def __init__(self, user_id: int):
+                self.effective_user = FakeUser(user_id)
+                self.message = None
+                self.edited_message = FakeEditedMessage(user_id)
+                self.effective_message = self.edited_message
+
+        class FakeContext:
+            def __init__(self, args: list[str]):
+                self.args = args
+
+        update = FakeUpdate(USER_ID)
+        context = FakeContext(["একটি", "ক্যালকুলেটর", "তৈরি", "কর"])
+
+        async def run():
+            with patch.object(self.main, "ask_ai", new=AsyncMock()) as ask_ai:
+                await self.main.codeproject_command(update, context)
+                ask_ai.assert_not_awaited()
+
+        asyncio.run(run())
+        self.assertIsNone(update.message)
+        self.assertTrue(len(update.edited_message.replies) > 0)
+        self.assertIn("প্রজেক্ট প্ল্যান তৈরি হয়েছে", "".join(update.edited_message.replies))
 
 
 if __name__ == "__main__":

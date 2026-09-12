@@ -253,5 +253,12 @@ if FAILED:
     print("\n".join(f"❌ {f}" for f in FAILED))
 print(f"\nমোট: {len(PASSED)} passed, {len(FAILED)} failed")
 
+# unittest discover-এ এই মডিউলটা import হলেও যেন বাকি টেস্টগুলো ভেঙে না পড়ে:
+# ১) cwd-কে কাজের ডিরেক্টরির বাইরে ফিরিয়ে এনে তবেই temp dir মুছি — নাহলে প্রসেসের
+#    cwd একটা মুছে ফেলা ডিরেক্টরিতে আটকে যায় আর পরের প্রতিটা টেস্ট os.getcwd()-এই
+#    FileNotFoundError খায়; ২) স্ক্রিপ্ট হিসেবে চালালে (এই ফাইলের ডকুমেন্টেড ব্যবহার)
+#    আগের মতোই exit code দেয়, কিন্তু discover-এ import-এর সময় SystemExit ছোড়ে না।
+os.chdir(REPO_ROOT)
 shutil.rmtree(WORKDIR, ignore_errors=True)
-sys.exit(1 if FAILED else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAILED else 0)

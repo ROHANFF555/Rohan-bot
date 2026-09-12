@@ -3,7 +3,7 @@ groq
 edge-tts
 httpx
 python-dotenv
-mcp>=1.2.0
-fastmcp
+mcp>=1.2.0,<2
+fastmcp>=2.0,<3
 starlette
 uvicorn

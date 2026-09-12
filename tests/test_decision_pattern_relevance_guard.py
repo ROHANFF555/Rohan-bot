@@ -185,12 +185,16 @@ class DecisionPatternRelevanceGuardTests(unittest.TestCase):
             self.assertTrue(ask_ai.await_count >= 1 or str(result.get("source", "")).startswith("knowledge_base:"))
 
     def test_process_next_code_task_rejects_non_code_direct_payload(self):
+        # নোট: description-এ "print ... when run" জাতীয় deterministic প্যাটার্ন
+        # রাখা যাবে না — সেটা এখন dynamic_print_task KB নিজেই সমাধান করে ফেলে
+        # (tests/test_dynamic_print_kb.py দেখুন)। এখানে ইচ্ছাকৃতভাবে এমন টাস্ক
+        # যা KB/dynamic KB দুটোতেই মিলবে না, যাতে Decision Engine রুটটা পরীক্ষা হয়।
         project_id = self.main.create_code_project(
             USER_ID,
             "Sanity net project",
-            "write a runner",
+            "write a retry layer",
             "python",
-            [{"title": "Implement runner", "description": "print success when run"}],
+            [{"title": "Implement retry layer", "description": "backoff logic for flaky network calls"}],
         )
         project = self.main.get_project(project_id, owner_id=USER_ID)
         fake_code = "def run():\n    print('ok')\n"

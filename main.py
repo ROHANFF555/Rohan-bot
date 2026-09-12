@@ -228,7 +228,24 @@ Phase 45 আপডেটে যা যা নতুন যোগ হয়েছ
   করা থাকে। এই পুরো ফিচারটা backward-compatible ভাবে যোগ হয়েছে (ask_ai/ask_ai_with_history-এ
   নতুন ঐচ্ছিক user_id প্যারামিটার, ডিফল্ট None) — আগের কোনো Command/Feature/UI/MCP
   সার্ভার-টুল বদলায়নি বা ভাঙেনি।
-=========================================================================
+
+Phase 47 আপডেটে যা যা নতুন যোগ হয়েছে (Source Attribution):
+  প্রতিটা তথ্যবহ উত্তরের নিচে এখন একটা ছোট্ট **উৎস-ব্যাজ** বসে — ইউজার এক নজরেই দেখতে পান
+  তথ্যটা কোথা থেকে এসেছে: 🔵 Groq API (LLM-এর লেখা) · 🌐 Browser Search (লাইভ ওয়েব) ·
+  💾 Database (নিজের Brain OS / Response Cache) · 🔄 Hybrid (একাধিক উৎস মিলিয়ে)। সাথে থাকে
+  সময়, মূল সোর্সের লিংক, কোন কোন সোর্স চেক করা হয়েছিল এবং নির্ভুলতার স্তর
+  (🟢 উচ্চ ৮৫–১০০% / 🟡 মাঝারি ৬০–৮৫% / 🔴 নিম্ন < ৬০%)।
+  Automatic priority (স্বয়ংক্রিয় ক্রম, কোনো আলাদা /search কমান্ডের দরকার নেই):
+  1️⃣ 💾 Database (Brain OS / Response Cache) → 2️⃣ 🌐 Browser Search (DuckDuckGo/Wikipedia,
+  দরকার হলে AI দিয়ে গুছিয়ে) → 3️⃣ 🔵 Groq API (fallback)। এই একই ক্রম সব হ্যান্ডলারে
+  (chat, joke, quote, translate, grammar, rewrite, tone, summarize) প্রযোজ্য — ব্রাউজার সার্চ
+  এখন আলাদা কমান্ড নয়, বরং ডাটাবেজে না পেলে স্বয়ংক্রিয়ভাবে চলে (বিস্তারিত:
+  docs/SOURCE_ATTRIBUTION.md)।
+  ব্যাজের আসল লজিক rohan_bot/utils/source_tracker.py + rohan_bot/config.py-তে (Telegram/AI/DB
+  থেকে সম্পূর্ণ স্বাধীন, তাই আলাদাভাবে দ্রুত unit-test করা যায়)। নিরাপত্তা: প্যাকেজটা কোনো
+  কারণে import না হলে বা ফিচার বন্ধ করা থাকলে বট ভাঙে না — শুধু ব্যাজ থাকে না, আর Browse
+  Search-এর উত্তরে তখন আগের মতোই সাধারণ উৎস-ফুটার দেখানো হয়। কোনোটাই breaking change নয়।
+  /brainstatus-এ এখন Browse Search ও Source Attribution-এর অবস্থাও দেখা যায়।
 """
 
 from __future__ import annotations
@@ -303,6 +320,24 @@ import contextlib  # Phase 43: FastMCP lifespan fallback বানাতে
 import base64   # Phase 43: OAuth 2.1 PKCE (S256 code_challenge ভেরিফিকেশন)
 from urllib.parse import urlencode as _url_encode  # Phase 43: OAuth redirect URL বানাতে
 from urllib.parse import parse_qs  # Phase 43: ASGI middleware-এ query string থেকে token পড়তে
+
+# ---- Bangla Rule Engine (নিয়ম-ভিত্তিক বাংলা→Python deterministic ট্রান্সলেটর) ----
+# আলাদা মডিউল bangla_rule_engine.py-তে (ভেরিয়েবল/ইনপুট/শর্ত/নিষেধ/আউটপুট/তুলনা রুল)।
+# টেস্ট-স্যান্ডবক্সে main.py কে একা টেম্প-ডিরেক্টরিতে কপি করা হলে (tests/test_dynamic_print_kb.py
+# -এর মতো) মডিউলটি sys.path-এ নাও থাকতে পারে — তখন ইঞ্জিন নিঃশব্দে বন্ধ থাকে
+# (ম্যাচ=None → আগের ফ্লো অক্ষত), কোনো এররে বট ভাঙে না।
+try:
+    from bangla_rule_engine import translate_bangla_rules as _bangla_rule_translate
+except ImportError:  # pragma: no cover — স্যান্ডবক্স-পরিস্থিতি
+    try:
+        _bre_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(os.path.join(_bre_dir, "bangla_rule_engine.py")):
+            sys.path.insert(0, _bre_dir)
+            from bangla_rule_engine import translate_bangla_rules as _bangla_rule_translate
+        else:
+            _bangla_rule_translate = None  # type: ignore[assignment]
+    except ImportError:
+        _bangla_rule_translate = None  # type: ignore[assignment]
 
 
 # ============================= সেটআপ (Configuration) =============================
@@ -2117,7 +2152,9 @@ class KnowledgeEngine:
         কখনোই কোনো candidate দিতে পারতো না — যতই তথ্য সেভ করা থাকুক না কেন, সবসময় সরাসরি
         AI-তে চলে যেত। এখন `self._search_engine` (FTS5 ভিত্তিক) দিয়ে আসল সার্চ চালিয়ে
         Decision Engine-এর ranking-এর জন্য উপযুক্ত shape-এ (score 0..1, confidence_score,
-        content) রিটার্ন করে। কোনো এক্সেপশন ছুঁড়ে না — সমস্যা হলে খালি লিস্ট।
+        content) রিটার্ন করে। Phase 48: metadata-য় expires_at (মেয়াদ) থাকা এন্ট্রি মেয়াদ
+        পেরোলে স্কিপ হয় — ক্যাশ-পয়জনিং ঠেকাতে মেয়াদোত্তীর্ণ উত্তর আর Step 1-এ ফেরে না।
+        কোনো এক্সেপশন ছুঁড়ে না — সমস্যা হলে খালি লিস্ট।
         """
         try:
             result = self._search_engine.search(query, page_size=max(1, min(limit, 20)), status="active")
@@ -2125,6 +2162,11 @@ class KnowledgeEngine:
             match_type = result.get("match_type", "empty")
             out: List[Dict[str, Any]] = []
             for row in items:
+                # Phase 48: মেয়াদোত্তীর্ণ (expires_at পেরোনো) এন্ট্রি বাদ — পুরোনো/ভুল
+                # cached উত্তর আর Decision Engine-এর কাছে পৌঁছায় না (ক্যাশ-পয়জনিং ঠেকানো)।
+                if _knowledge_entry_expired(row.get("metadata") if isinstance(row, dict) else None):
+                    logger.debug(f"KnowledgeEngine.search(): মেয়াদোত্তীর্ণ এন্ট্রি স্কিপ (id={row.get('id')})")
+                    continue
                 rank = row.get("rank_score")
                 if match_type in ("exact", "relaxed") and isinstance(rank, (int, float)):
                     # bm25(): সবসময় <=0, |rank| যত বড় তত জোরালো/বহু-টোকেন মিল। তাই
@@ -4649,6 +4691,11 @@ class DecisionRepository:
 # দিয়ে সেগুলো candidate তালিকা থেকে সম্পূর্ণ বাদ যায়।
 CODING_EXCLUDED_BRAIN_CATEGORIES: List[str] = ["bot_info", "greeting"]
 
+# decision dict-এর সাথে সাজানো candidate তালিকার কয়টা শীর্ষ এন্ট্রি সংযোজিত থাকবে —
+# coding-orchestrator এগুলো থেকে "প্রাসঙ্গিক নিয়ম/গাইডলাইন" (non-code entries) বাছাই
+# করে AI প্রম্পটে যোগ করে (সব candidate সংযোজন করলে decision dict অপ্রয়োজনে বড় হত)।
+DECISION_CANDIDATES_KEPT = 6
+
 
 def _normalize_exclude_categories(exclude_categories: Optional[Sequence[str]] = None) -> set:
     try:
@@ -4838,7 +4885,11 @@ class DecisionEngine(EngineInterface):
         strategy="direct" if best["stage"] in ("knowledge","pattern","documentation","template") and best["confidence"]>=0.72 and match_quality_ok else "ai"
         decision={"request_hash":key,"stage":best["stage"],"strategy":strategy,"provider_hint":provider_hint,
                   "confidence":round(float(best["confidence"]),3),"score":best["score"],"candidate_count":len(candidates),
-                  "context":ctx,"payload":best["payload"],"fallback":"ai","retry_max":AI_KEY_RETRY_MAX_ATTEMPTS,"cached":False}
+                  "context":ctx,"payload":best["payload"],"fallback":"ai","retry_max":AI_KEY_RETRY_MAX_ATTEMPTS,"cached":False,
+                  # শীর্ষ candidate গুলো (সাজানো ক্রমে) সংযোজন — coding-orchestrator যেন
+                  # direct-এ reject হওয়া/নিচের প্রাসঙ্গিক knowledge/pattern/template এন্ট্রি
+                  # গুলো AI প্রম্পটে "নিয়ম/গাইডলাইন" হিসেবে ব্যবহার করতে পারে।
+                  "candidates":[dict(c) for c in candidates[:DECISION_CANDIDATES_KEPT]]}
         saved=self.repo.save(BrainDecision(user_id=user_id,request_hash=key,stage=decision["stage"],strategy=strategy,
             provider_hint=provider_hint,confidence=decision["confidence"],score=decision["score"],
             payload=json.dumps(decision["payload"],ensure_ascii=False,default=str)))
@@ -6641,23 +6692,29 @@ async def localize(user_id: int, bn_text: str) -> str:
 async def quota_guard(update: Update, action: str = "general") -> bool:
     """সীমা শেষ হলে মেসেজ পাঠিয়ে False রিটার্ন করে, কাজ চালিয়ে যাওয়া ঠিক থাকলে True।"""
     user_id = update.effective_user.id
+    # Note: Use effective_message to handle edited message updates safely.
+    # Pattern should be audited repo-wide in a follow-up.
+    msg = update.message or update.effective_message
     if is_banned(user_id):
-        await update.message.reply_text(await localize(user_id, "দুঃখিত, আপনাকে এই বট ব্যবহার করা থেকে বিরত রাখা হয়েছে।"))
+        if msg:
+            await msg.reply_text(await localize(user_id, "দুঃখিত, আপনাকে এই বট ব্যবহার করা থেকে বিরত রাখা হয়েছে।"))
         return False
     if user_id not in ADMIN_IDS and not flood_check(user_id):
-        await update.message.reply_text(
-            await localize(user_id, f"⚠️ আপনি খুব দ্রুত মেসেজ পাঠাচ্ছেন। অনুগ্রহ করে {FLOOD_BLOCK_SECONDS} সেকেন্ড অপেক্ষা করুন।")
-        )
+        if msg:
+            await msg.reply_text(
+                await localize(user_id, f"⚠️ আপনি খুব দ্রুত মেসেজ পাঠাচ্ছেন। অনুগ্রহ করে {FLOOD_BLOCK_SECONDS} সেকেন্ড অপেক্ষা করুন।")
+            )
         return False
     if not check_and_use_quota(user_id):
         daily_limit = get_daily_limit(user_id)
         extra_hint = "" if is_premium_active(user_id) else " বেশি সীমা পেতে প্রিমিয়াম নিন — /premiumstatus দেখুন।"
-        await update.message.reply_text(
-            await localize(
-                user_id,
-                f"আজকের সীমা ({daily_limit} বার) শেষ হয়ে গেছে। আগামীকাল আবার ব্যবহার করতে পারবেন।{extra_hint}",
+        if msg:
+            await msg.reply_text(
+                await localize(
+                    user_id,
+                    f"আজকের সীমা ({daily_limit} বার) শেষ হয়ে গেছে। আগামীকাল আবার ব্যবহার করতে পারবেন।{extra_hint}",
+                )
             )
-        )
         return False
     log_usage(user_id, action)
     return True
@@ -6832,6 +6889,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/removeapikey provider — নিজস্ব Key মুছে ফেলুন\n\n"
         "🎁 রেফারেল\n"
         "/myreferrals — আপনার নিজের রেফার লিংক ও বোনাসের হিসাব দেখুন\n\n"
+        "🏷️ উৎস চিহ্ন (Source badge)\n"
+        "প্রতিটা তথ্যবহ উত্তরের নিচে দেখানো হয় তথ্যটা কোথা থেকে এসেছে:\n"
+        "🔵 Groq API (AI-এর লেখা) · 🌐 Browser Search (লাইভ ওয়েব) · 💾 Database (নিজের নলেজ বেস) · 🔄 Hybrid (মিশ্র)\n\n"
         f"প্রতিদিন ফ্রি সীমা: {FREE_DAILY_LIMIT} বার, প্রিমিয়াম সীমা: {PREMIUM_DAILY_LIMIT} বার (AI ফিচারের জন্য)\n"
         "━━━━━━━━━━━━━━━\n"
         f"✨ Developed by {CREATOR_COMPANY}"
@@ -7074,6 +7134,7 @@ brain_os_metrics = {
     "direct_answers": 0,
     "ai_routes": 0,
     "direct_failures": 0,
+    "time_sensitive_skips": 0,  # Phase 48: time-sensitive প্রশ্নে Step 1 (Database) স্কিপের সংখ্যা
     "no_api_stuck": 0,   # Phase 43: No-API-Call Mode (per-user) চালু থাকা অবস্থায় মোট যতবার Brain OS নিজে থেকে উত্তর দিতে পারেনি (সব ইউজার মিলিয়ে)
     "browse_answers": 0,  # Phase 44: Brain OS ডাটাবেজে না পেয়ে ফ্রি Browse Search (DuckDuckGo/Wikipedia) দিয়ে যতবার উত্তর দিয়েছে
 }
@@ -7114,8 +7175,13 @@ def set_no_api_mode(user_id: int, enabled: bool) -> None:
 # ============================= Phase 44: Browse Search (ফ্রি ওয়েব সার্চ ফলব্যাক) =============================
 # উদ্দেশ্য: ইউজার কিছু জিজ্ঞেস করলে Brain OS প্রথমে নিজের ডাটাবেজে (Knowledge/Pattern/
 # Template/Documentation Engine) খোঁজে (Decision Engine, উপরে আগে থেকেই আছে)। সেখানে
-# ভরসাযোগ্য সরাসরি উত্তর না পেলে, সরাসরি AI API কল করার আগে একবার সম্পূর্ণ ফ্রি (কোনো Key/
-# টাকা লাগে না) Browse Search চেষ্টা করা হয় — DuckDuckGo Instant Answer, তারপর Wikipedia।
+# ভরসায়োগ্য সরাসরি উত্তর না পেলে, সরাসরি AI API কল করার আগে একবার Browse Search চেষ্টা
+# করা হয়। Phase 48 থেকে চেইনের ক্রম: Real Web Search (Tavily — TAVILY_API_KEY থাকলে)
+# → DuckDuckGo Instant Answer (সম্পূর্ণ ফ্রি) → Wikipedia। Tavily একটা আসল ফুল-টেক্সট
+# সার্চ-ইঞ্জিন (LLM-optimized) — DuckDuckGo Instant Answer বাংলা প্রশ্ন-বাক্যে ("... কে?",
+# "... কত?") প্রায় সবসময় খালি ফল দেয়, তাই Key থাকলে প্রথমে Tavily চেষ্টা হয়; Key না
+# থাকলে/কল ব্যর্থ হলে ধীরে পুরোনো ফ্রি-চেইনে (DuckDuckGo → Wikipedia) ফেলব্যাক হয় —
+# তাই পুরোনো আচরণ কোনোভাবেই ভাঙে না।
 # উদাহরণ: "বাংলাদেশের প্রধানমন্ত্রীর নাম কি" — এটা ডাটাবেজে না থাকলে প্রথমে ব্রাউজ সার্চ করবে;
 # তথ্য পেলে তা গুছিয়ে ইউজারকে দেওয়া হবে ও নিজের Knowledge Engine-এ সেভ হয়ে যাবে (পরের বার
 # একই প্রশ্নে আর Browse/AI কোনোটাই লাগবে না)। ব্রাউজ থেকে কিছু না পেলে তখনই স্বাভাবিক AI API
@@ -7123,6 +7189,116 @@ def set_no_api_mode(user_id: int, enabled: bool) -> None:
 # যুক্ত হয়ে যাবে।
 
 BROWSE_SEARCH_TIMEOUT = 8  # সেকেন্ড — DuckDuckGo/Wikipedia প্রতিটা কলের timeout, ধীর হলে দ্রুত বাদ দিয়ে পরেরটায় যায়
+
+
+# ============================= Phase 48: Time-sensitive Query + Real Search =============================
+# সমস্যা: "বর্তমান প্রধানমন্ত্রী/রাষ্ট্রপতি/CEO কে", "দাম কত", "স্কোর" জাতীয় সময়-সংবেদনশীল
+# প্রশ্নের উত্তর Phase 44-এর চেইনে (DuckDuckGo Instant Answer + Wikipedia extract) প্রায়ই
+# পুরোনো/ভুল হয়, আর সেই উত্তর Knowledge Engine-এ সেভ হয়ে ক্যাশ-পয়জনিং করত — একই/কাছাকাছি
+# প্রশ্নে বারবার একই ভুল উত্তর ফিরে আসত, কখনো re-verify হতো না। Phase 48-এর সমাধান তিন স্তরে:
+#   1. Real Web Search আগে (_browse_real_search — Tavily), তারপর পুরোনো ফ্রি-চেইন।
+#   2. time-sensitive প্রশ্নে Step 1 (Database cache) স্কিপ (_phase17_decide-এ) —
+#      যাতে পুরনো cached উত্তর না দেওয়া হয়, সবসময় নতুন করে সার্চ হয়।
+#   3. time-sensitive উত্তর সেভ করলে metadata-তে expires_at (এখন + ৭ দিন) — read path
+#      (KnowledgeEngine.search) মেয়াদোত্তীর্ণ এন্ট্রি স্কিপ করে, ভুল উত্তর আর ফেরে না।
+
+# time-sensitive প্রশ্নের cached উত্তর কত দিন "তাজা" থাকবে (env দিয়ে বদলানো যায়)।
+TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS = max(1, int(os.getenv("TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS", "7") or "7"))
+
+TIME_SENSITIVE_KNOWLEDGE_TTL_SECONDS = TIME_SENSITIVE_KNOWLEDGE_TTL_DAYS * 24 * 60 * 60
+
+#: Tavily Real Web Search — LLM-optimized আসল সার্চ-ইঞ্জিন, ফ্রি টায়ারে মাসে ১,০০০+ কল।
+#: Key (TAVILY_API_KEY) না দিলে ফিচারটাই বন্ধ থাকে — চুপচাপ DuckDuckGo → Wikipedia
+#: চেইনে ফেলব্যাক হয়, বট কখনো crash করে না।
+TAVILY_API_ENDPOINT = "https://api.tavily.com/search"
+
+#: যেসব শব্দ থাকলেই প্রশ্নটা "সময়-সংবেদনশীল" — উত্তর বদলাতে থাকে (দাম, স্কোর, খবর,
+#: দিন-তারিখ) বা বর্তমান-নির্দেশক। ছোট শব্দগুলো whole-token হিসেবে মেলানো হয়
+#: ("আজাদ"-এর ভেতরের "আজ" মিলবে না, কিন্তু স্বাধীন "আজ" টোকেন মিলবে)।
+_TIME_SENSITIVE_WORDS = frozenset({
+    "এখন", "এখনকার", "আজ", "আজকে", "আজকের", "কবে", "কখন", "স্কোর", "খবর", "লাইভ",
+    "ফলাফল", "দাম", "মূল্য",
+    "now", "current", "currently", "today", "tonight", "latest", "recent", "price",
+    "score", "live", "news", "when",
+})
+
+#: বহু-শব্দ/দীর্ঘ অবিস্পষ্ট বাক্যাংশ — substring হিসেবেই মেলানো নিরাপদ।
+_TIME_SENSITIVE_PHRASES = (
+    "বর্তমান", "এই মুহূর্তে", "এ মুহূর্তে", "সর্বশেষ", "সবশেষ", "দাম কত", "কত দাম",
+    "কত মূল্য", "right now", "as of now",
+)
+
+#: পদবি/উপাধি — "এখন কে" জাতীয় প্রশ্নের উত্তর প্রায়ই বদলায় (মেয়াদ, নির্বাচন, নিয়োগ)।
+#: দীর্ঘ ও স্বতন্ত্র শব্দ, তাই substring ম্যাচ নিরাপদ ("প্রধানমন্ত্রীর"-এও মিলবে)।
+_TIME_SENSITIVE_TITLE_PHRASES = (
+    "প্রধানমন্ত্রী", "রাষ্ট্রপতি", "মুখ্যমন্ত্রী", "মন্ত্রী", "চেয়ারম্যান", "চেয়ারপারসন",
+    "সভাপতি", "সম্পাদক", "মেয়র", "সিইও", "ব্যবস্থাপনা পরিচালক", "প্রধান নির্বাহী",
+    "প্রেসিডেন্ট", "গভর্নর", "প্রধান বিচারপতি",
+    "prime minister", "chief minister", "minister", "chairman", "chairperson",
+    "ceo", "cto", "cfo", "mayor", "governor", "chief executive",
+)
+
+#: পদবি-প্রশ্নকে time-sensitive ধরতে সাথে এই "কে/কার/কোন/who" জাতীয় টোকেন থাকতে
+#: হবে — নইলে ইতিহাস-প্রশ্নও ধরা পড়ত ("রবীন্দ্রনাথ কে ছিলেন")।
+_TIME_SENSITIVE_WHO_TOKENS = frozenset({"কে", "কার", "কোন", "কাকে", "who", "whos"})
+
+
+def _is_time_sensitive_query(text: str) -> bool:
+    """প্রশ্নটা সময়-সংবেদনশীল কিনা — "বর্তমান প্রধানমন্ত্রী কে", "রাষ্ট্রপতি কে",
+    "CEO কে", "দাম কত", "স্কোর", "কবে" জাতীয় প্রশ্নে True। এই ধরনের প্রশ্নের cached
+    উত্তর পুরোনো হয়ে যেতে পারে, তাই Phase 48-এ এদের জন্য: Step 1 (Database cache)
+    স্কিপ + সেভ করা উত্তরে expires_at (৭ দিন) + real search-কে অগ্রাধিকার।
+    কোনো এক্সেপশন ছোঁড়ে না — ডিটেকশন ব্যর্থ হলে False (আগের আচরণ)।"""
+    try:
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        # ১) বহু-শব্দের নিশ্চিত বাক্যাংশ আগে (substring ম্যাচ)।
+        if any(phrase in t for phrase in _TIME_SENSITIVE_PHRASES):
+            return True
+        # ২) টোকেন ভাগ করে (যতিচিহ্ন বাদ) ছোট শব্দগুলো whole-token হিসেবে মেলানো হয়।
+        tokens = set(re.findall(r"[\w\u0980-\u09FF]+", t, flags=re.UNICODE))
+        if tokens & _TIME_SENSITIVE_WORDS:
+            return True
+        # ৩) পদবি/উপাধি + "কে/কার/কোন/who" জাতীয় প্রশ্নবোধক — বর্তমান-ধারক প্রশ্ন।
+        if any(title in t for title in _TIME_SENSITIVE_TITLE_PHRASES):
+            if tokens & _TIME_SENSITIVE_WHO_TOKENS:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — ডিটেকশন কখনো চ্যাট-ফ্লো ভাঙবে না
+        return False
+
+
+def _phase48_knowledge_expires_at(user_text: str) -> str:
+    """time-sensitive প্রশ্নের উত্তরের জন্য মেয়াদ (ISO 8601 UTC) — এখন + ৭ দিন;
+    সাধারণ প্রশ্নে খালি স্ট্রিং (মানে মেয়াদ নেই — আগের মতোই দীর্ঘস্থায়ী ক্যাশ)।"""
+    if not _is_time_sensitive_query(user_text):
+        return ""
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=TIME_SENSITIVE_KNOWLEDGE_TTL_SECONDS)
+    ).isoformat(timespec="seconds")
+
+
+def _knowledge_entry_expired(metadata_value: Any, now: Optional[datetime] = None) -> bool:
+    """Knowledge entry-র metadata-য় Phase 48-এর ``expires_at`` থাকলে এবং তা পেরিয়ে
+    গেলে True — মেয়াদোত্তীর্ণ cached উত্তর আর Decision Engine-এর read path (Step 1)
+    থেকে ফেরে না (ক্যাশ-পয়জনিং ঠেকানো)। ``expires_at`` না থাকলে/পার্স না হলে False —
+    পুরোনো এন্ট্রির আচরণ অক্ষত থাকে।"""
+    try:
+        data = metadata_value
+        if isinstance(data, str):
+            data = json.loads(data or "{}")
+        if not isinstance(data, dict):
+            return False
+        raw = str(data.get("expires_at") or "").strip()
+        if not raw:
+            return False
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt <= (now or datetime.now(timezone.utc))
+    except Exception:  # noqa: BLE001 — খারাপ metadata কখনো read path ভাঙবে না
+        return False
 
 
 async def _browse_duckduckgo(query: str) -> Optional[Dict[str, str]]:
@@ -7184,15 +7360,104 @@ async def _browse_wikipedia(query: str, lang: str = "bn") -> Optional[Dict[str, 
         if not text:
             return None
         page_url = ((summary.get("content_urls") or {}).get("desktop") or {}).get("page", "")
-        return {"text": text[:1800], "source": f"Wikipedia ({lang})", "url": page_url}
+        return {
+            "text": text[:1800],
+            "source": f"Wikipedia ({lang})",
+            "url": page_url,
+            # Issue C hardening: runtime সিদ্ধান্তে শুধু display source/URL regex-এর উপর
+            # নির্ভর না করে Wikipedia ভাষাটা explicit metadata হিসেবেও বহন করা হয়।
+            # এতে matched_source/source কোনো কারণে বদলে গেলেও `_browse_result_language_code()`
+            # Bengali Wikipedia-কে নির্ভরযোগ্যভাবে `bn` হিসেবে চিনতে পারে।
+            "source_lang_code": str(lang or "").strip().lower(),
+        }
     except Exception as e:
         logger.debug(f"Phase 44 Wikipedia({lang}) Browse Search ব্যর্থ: {e}")
         return None
 
 
+def _real_search_configured() -> bool:
+    """Phase 48 Real Web Search (Tavily)-এর Key (TAVILY_API_KEY) সেট করা আছে কিনা।
+    Key না থাকলে ফিচারটা নিঃশব্দে বন্ধ থাকে — পুরোনো DuckDuckGo → Wikipedia চেইনই চলে।"""
+    try:
+        return bool((os.getenv("TAVILY_API_KEY") or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _browse_real_search(query: str, lang_hint: str = "") -> Optional[Dict[str, str]]:
+    """Phase 48: Tavily Real Web Search API (LLM-optimized আসল সার্চ-ইঞ্জিন) থেকে তথ্য
+    আনে — DuckDuckGo Instant Answer নামি QA-ইঞ্জিন, বাংলা প্রশ্ন-বাক্যে খালি ফল দেয়;
+    Tavily ফুল-টেক্সট ওয়েব সার্চ করে তাই ব্রেকিং নিউজ/দাম/স্কোর/নির্বাচনের ফলাফল জাতীয়
+    প্রশ্নেও তাজা ফল পাওয়া যায়।
+
+    - Key (TAVILY_API_KEY env) না থাকলে None — caller তখন পুরোনো ফ্রি-চেইনে ফেলব্যাক করে।
+    - ফলাফলে Tavily-র synthesized answer + শীর্ষ কয়েকটা রেজাল্টের snippet থাকে।
+    - কোনো এক্সেপশন ছোঁড়ে না — ব্যর্থ হলে None (browse_web_search পরের সোর্সে যাবে)।
+    """
+    api_key = (os.getenv("TAVILY_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        client = await get_http_client()
+        resp = await client.post(
+            TAVILY_API_ENDPOINT,
+            json={
+                "api_key": api_key,
+                "query": query,
+                "search_depth": "basic",
+                "include_answer": True,
+                "max_results": 5,
+            },
+            timeout=BROWSE_SEARCH_TIMEOUT,  # আগের মতোই একই timeout — ধীর হলে দ্রুত বাদ
+        )
+        if resp.status_code != 200:
+            logger.debug(f"Phase 48 Tavily Real Search ব্যর্থ: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        answer = str((data.get("answer") or "") or "").strip()
+        results = data.get("results") or []
+        if not isinstance(results, list):
+            results = []
+        # শীর্ষ রেজাল্টগুলোর টাইটেল+snippet জুড়ে দেওয়া হয় — শুধু synthesized answer
+        # খালি/অসম্পূর্ণ হলেও ইউজার বাস্তব উৎসের টুকরো থেকে তথ্য পায়।
+        parts = []
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if title or content:
+                parts.append(f"• {title}: {content}".strip(": "))
+        text = answer
+        if parts:
+            text = (answer + "\n\n" if answer else "") + "\n".join(parts)
+        text = (text or "").strip()
+        if not text:
+            return None
+        first_url = ""
+        if results and isinstance(results[0], dict):
+            first_url = str(results[0].get("url") or "").strip()
+        return {"text": text[:1800], "source": "Tavily Web Search", "url": first_url}
+    except Exception as e:  # noqa: BLE001 — Key ভুল/নেটওয়ার্ক ডাউন → চুপচাপ পরের সোর্স
+        logger.debug(f"Phase 48 Tavily Real Search ব্যর্থ: {e}")
+        return None
+
+
+def _browse_target_wikipedia_lang(lang_hint: str = "") -> str:
+    """Browse Search-এ Wikipedia কোন ভাষায় জিজ্ঞেস করা হবে সেটা নির্ধারণ করে।"""
+    hint = (lang_hint or "").strip().lower()
+    return "bn" if ("bengali" in hint or "bangla" in hint or "বাংলা" in hint or hint == "bn") else "en"
+
+
 async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[str, str]]:
     """Brain OS ডাটাবেজে সরাসরি উত্তর না পেলে এখান থেকে ফ্রি Browse Search করা হয়।
-    ক্রম: DuckDuckGo Instant Answer -> Wikipedia (ইউজারের ভাষা অনুযায়ী) -> Wikipedia (ইংরেজি)।
+    ক্রম (Phase 48): Tavily Real Web Search (TAVILY_API_KEY থাকলে) -> DuckDuckGo
+    Instant Answer -> Wikipedia (ইউজারের ভাষা অনুযায়ী) -> Wikipedia (ইংরেজি)।
+    time-sensitive প্রশ্নে ("বর্তমান প্রধানমন্ত্রী কে", "দাম কত" ইত্যাদি) Tavily-কেই
+    অগ্রাধিকার — DDG/Wikipedia শুধু ফেলব্যাক হিসেবে (এগুলোর ফল পুরোনো হতে পারে)।
     প্রথম যেটাতে আসল (খালি নয়) তথ্য পাওয়া যায় সেটাই রিটার্ন হয়। রিটার্ন করা dict-এ 'tried_sources'
     key-এ ক্রমানুসারে সব সোর্স যা চেষ্টা করা হয়েছে (সফল/ব্যর্থ নির্বিশেষে) থাকে — যাতে ইউজার/এডমিন
     দেখতে পারে ঠিক কোন কোন ব্রাউজার/সোর্স চেক করা হয়েছিল। সবগুলো খালি/ব্যর্থ হলে None — তখন
@@ -7202,6 +7467,20 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         return None
 
     tried_sources = []
+    # Phase 48: আসল web search (Tavily) সবার আগে — DDG-র Instant Answer QA-ইঞ্জিন, বাংলা
+    # প্রশ্নে প্রায় খালি ফল দেয়; Tavily ফুল-টেক্সট সার্চ করে। Key না থাকলে ধাপটা পুরো
+    # স্কিপ (tried_sources-এও যোগ হয় না — চেষ্টাই করা হয়নি), ব্যর্থ হলে নিচের পুরোনো
+    # ফ্রি-চেইনে ফেলব্যাক — আগের আচরণ অক্ষত।
+    if _real_search_configured():
+        tried_sources.append("Tavily Web Search")
+        logger.info(f"[Browse Search] Tavily Real Web Search চেষ্টা করা হচ্ছে | query: {query!r}")
+        result = await _browse_real_search(query, lang_hint=lang_hint)
+        if result:
+            logger.info(f"[Browse Search] Tavily থেকে উত্তর পাওয়া গেছে | query: {query!r}")
+            result["tried_sources"] = tried_sources.copy()
+            result["matched_source"] = "Tavily Web Search"
+            return result
+        logger.info(f"[Browse Search] Tavily ব্যর্থ, পুরোনো ফ্রি-চেইনে ফেলব্যাক | query: {query!r}")
 
     tried_sources.append("DuckDuckGo Instant Answer")
     logger.info(f"[Browse Search] DuckDuckGo চেষ্টা করা হচ্ছে | query: {query!r}")
@@ -7212,8 +7491,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         result["matched_source"] = "DuckDuckGo Instant Answer"
         return result
 
-    hint = (lang_hint or "").strip().lower()
-    wiki_lang = "bn" if ("bengali" in hint or "bangla" in hint or "বাংলা" in hint or hint == "bn") else "en"
+    wiki_lang = _browse_target_wikipedia_lang(lang_hint)
     tried_sources.append(f"Wikipedia ({wiki_lang})")
     logger.info(f"[Browse Search] Wikipedia ({wiki_lang}) চেষ্টা করা হচ্ছে | query: {query!r}")
     result = await _browse_wikipedia(query, lang=wiki_lang)
@@ -7221,6 +7499,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
         logger.info(f"[Browse Search] Wikipedia ({wiki_lang}) থেকে উত্তর পাওয়া গেছে | query: {query!r}")
         result["tried_sources"] = tried_sources.copy()
         result["matched_source"] = f"Wikipedia ({wiki_lang})"
+        result["source_lang_code"] = str(result.get("source_lang_code") or wiki_lang).strip().lower()
         return result
 
     if wiki_lang != "en":
@@ -7231,6 +7510,7 @@ async def browse_web_search(query: str, lang_hint: str = "") -> Optional[Dict[st
             logger.info(f"[Browse Search] Wikipedia (en) থেকে উত্তর পাওয়া গেছে | query: {query!r}")
             result["tried_sources"] = tried_sources.copy()
             result["matched_source"] = "Wikipedia (en)"
+            result["source_lang_code"] = str(result.get("source_lang_code") or "en").strip().lower()
             return result
 
     logger.info(f"[Browse Search] সব সোর্স ব্যর্থ, কিছুই পাওয়া যায়নি | tried: {tried_sources} | query: {query!r}")
@@ -7247,14 +7527,38 @@ def _phase44_save_browsed_knowledge(user_text: str, answer_text: str, source: st
         content = (answer_text or "").strip()
         if not content:
             return
-        KnowledgeEngine().create(
+        # Phase 48 (ক্যাশ-পয়জনিং ঠেকানো): time-sensitive প্রশ্নের উত্তর চিরদিনের জন্য
+        # সেভ করা হয় না — metadata-তে expires_at (এখন + ৭ দিন) বসে; read path
+        # (KnowledgeEngine.search) মেয়াদ পেরোলে এন্ট্রিটা আর কাউকে দেখায় না, ফলে
+        # পরের বার নতুন করে সার্চই হয়। সাধারণ প্রশ্নে expires_at থাকে না (আগের মতোই)।
+        metadata = {"origin": "browse_search", "source": source, "url": url}
+        expires_at = _phase48_knowledge_expires_at(user_text)
+        if expires_at:
+            metadata["expires_at"] = expires_at
+        engine = KnowledgeEngine()
+        if expires_at:
+            # একই উত্তর আগেও সেভ করা থাকলে create() নতুন রো বানায় না (ডুপ্লিকেট
+            # রিটার্ন করে) — সেক্ষেত্রে পুরোনো এন্ট্রির মেয়াদই নতুন করে বসিয়ে দেওয়া
+            # হয়, যাতে সেটা "চির-মেয়াদোত্তীর্ণ জম্বি" না হয়ে বরং আবার ব্যবহারযোগ্য থাকে।
+            existing = engine.check_duplicate("browse_search", title, content)
+            if existing is not None:
+                try:
+                    old_meta = json.loads(existing.metadata or "{}")
+                    if not isinstance(old_meta, dict):
+                        old_meta = {}
+                except Exception:  # noqa: BLE001
+                    old_meta = {}
+                old_meta["expires_at"] = expires_at
+                engine.update(existing.id, metadata=old_meta)
+                return
+        engine.create(
             category="browse_search",
             title=title,
             content=content,
             tags="auto,browse_search",
             priority=5,
             source="browse_search",
-            metadata={"origin": "browse_search", "source": source, "url": url},
+            metadata=metadata,
             confidence_score=0.75,
             status="active",
         )
@@ -7271,14 +7575,34 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         content = (answer_text or "").strip()
         if not content:
             return
-        KnowledgeEngine().create(
+        # Phase 48 (ক্যাশ-পয়জনিং ঠেকানো): AI-উত্তরেও হ্যালুসিনেশন/পুরোনো তথ্য থাকতে
+        # পারে — time-sensitive প্রশ্নে সেভ করা উত্তরে expires_at (এখন + ৭ দিন) বসে,
+        # যাতে ভুল উত্তর Step 1 থেকে অনন্তকাল রিপিট না হয় (মেয়াদ পেরোলে আবার সার্চ/AI)।
+        metadata = {"origin": "ai_fallback"}
+        expires_at = _phase48_knowledge_expires_at(user_text)
+        if expires_at:
+            metadata["expires_at"] = expires_at
+        engine = KnowledgeEngine()
+        if expires_at:
+            existing = engine.check_duplicate("ai_answer", title, content)
+            if existing is not None:
+                try:
+                    old_meta = json.loads(existing.metadata or "{}")
+                    if not isinstance(old_meta, dict):
+                        old_meta = {}
+                except Exception:  # noqa: BLE001
+                    old_meta = {}
+                old_meta["expires_at"] = expires_at
+                engine.update(existing.id, metadata=old_meta)
+                return
+        engine.create(
             category="ai_answer",
             title=title,
             content=content,
             tags="auto,ai_answer",
             priority=5,
             source="ai",
-            metadata={"origin": "ai_fallback"},
+            metadata=metadata,
             confidence_score=0.7,
             status="active",
         )
@@ -7286,75 +7610,365 @@ def _phase44_save_ai_knowledge(user_text: str, answer_text: str) -> None:
         logger.debug(f"Phase 44 AI উত্তর Knowledge Engine-এ সেভ করা যায়নি: {e}")
 
 
-async def _phase44_browse_and_answer(
-    user_id: int, user_text: str, lang_name: str, no_api_mode: bool
-) -> str:
-    """Decision Engine নিজের ডাটাবেজে সরাসরি উত্তর দিতে না পারলে (stage == "ai") এখানে প্রথমে
-    ফ্রি Browse Search চেষ্টা করা হয়। কিছু পাওয়া গেলে:
-      - No API Call Mode বন্ধ থাকলে: AI-কে ছোট্ট একটা কল করে বলা হয় কাঁচা browse ফলাফলটা
-        ইউজারের ভাষায় সুন্দর করে সাজিয়ে-গুছিয়ে দিতে, এবং সেই গুছানো উত্তরটাই Knowledge
-        Engine-এ সেভ হয়।
-      - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই সহজ ফরম্যাটে (উৎসসহ) কাঁচা তথ্যটাই
-        দেখানো হয় এবং একইভাবে সেভ হয়।
-    কিছুই না পাওয়া গেলে খালি স্ট্রিং রিটার্ন হয় — caller তখন স্বাভাবিক AI fallback ব্যবহার করবে।
-    কোনো ধাপেই এই ফাংশন এক্সসেপশন ছুঁড়ে না (ব্যর্থ হলে খালি স্ট্রিং), তাই chat_general-এর
-    স্বাভাবিক ফ্লো কখনো এর কারণে ভাঙবে না।"""
-    try:
-        found = await browse_web_search(user_text, lang_hint=lang_name)
-        if not found:
-            return ""
-
-        raw_text = (found.get("text") or "").strip()
-        source = found.get("source", "") or "ওয়েব সার্চ"
-        url = found.get("url", "") or ""
-        tried_sources = found.get("tried_sources") or []
-        if not raw_text:
-            return ""
-
-        # কোন কোন ব্রাউজার/সোর্স চেক করা হয়েছিল তার তালিকা — প্রমাণ হিসেবে সবসময় দেখানো হয়,
-        # যাতে ইউজার নিজেই বুঝতে পারে সত্যিই ব্রাউজ কল হয়েছে কিনা এবং কোথা থেকে উত্তর মিলেছে।
-        checked_line = ""
-        if tried_sources:
-            checked_line = "\n🔎 চেক করা হয়েছে: " + " → ".join(tried_sources)
-
-        if no_api_mode:
-            final_answer = raw_text
-            final_answer += f"\n\n📚 উৎস: {source}"
-            if url:
-                final_answer += f"\n🔗 {url}"
-            final_answer += checked_line
-            _phase44_save_browsed_knowledge(user_text, raw_text, source, url)
-            return final_answer
-
-        organized = raw_text
-        try:
-            organize_prompt = (
-                "তুমি একজন সহায়ক AI সহকারী। নিচে ওয়েব সার্চ থেকে পাওয়া কাঁচা তথ্য দেওয়া আছে। "
-                f"এটাকে ইউজারের প্রশ্নের সরাসরি জবাব হিসেবে {lang_name} ভাষায় সংক্ষেপে ও "
-                "পরিষ্কারভাবে সাজিয়ে-গুছিয়ে লেখো। নতুন কোনো তথ্য নিজে থেকে বানিয়ো না, শুধু "
-                "দেওয়া তথ্যটাই সহজ-বোধ্যভাবে উপস্থাপন করো।"
-            )
-            organize_input = (
-                f"ইউজারের প্রশ্ন: {user_text}\n\nওয়েব সার্চের কাঁচা তথ্য ({source}):\n{raw_text}"
-            )
-            ai_result = await ask_ai(organize_prompt, organize_input, use_cache=False, user_id=user_id)
-            organized = (ai_result or "").strip() or raw_text
-        except Exception as e:
-            logger.warning(f"Phase 44: browse ফলাফল AI দিয়ে গুছাতে ব্যর্থ, কাঁচা তথ্যই ব্যবহার হলো: {e}")
-            organized = raw_text
-
-        final_answer = organized
-        if url:
-            final_answer += f"\n\n🔗 উৎস: {url}"
-        else:
-            final_answer += f"\n\n📚 উৎস: {source}"
-        final_answer += checked_line
-
-        _phase44_save_browsed_knowledge(user_text, organized, source, url)
-        return final_answer
-    except Exception as e:
-        logger.warning(f"Phase 44 Browse Search সম্পূর্ণ ব্যর্থ, স্বাভাবিক AI fallback ব্যবহার হবে: {e}")
+def _browse_result_language_code(found: Optional[Dict[str, Any]]) -> str:
+    """Wikipedia source name বা metadata থেকে language code extract করে (যেমন: bn, en)।"""
+    if not isinstance(found, dict):
+        logger.info(
+            f"[DEBUG] _browse_result_language_code(): invalid found type: {type(found).__name__}"
+        )
         return ""
+    logger.info(f"[DEBUG] _browse_result_language_code() input keys: {found.keys()}")
+    for key in ("source_lang_code", "language_code", "lang", "wiki_lang"):
+        val = str(found.get(key) or "").strip().replace("_", "-").lower()
+        logger.info(f"[DEBUG] _browse_result_language_code() metadata {key}: '{val}'")
+        if re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]+)?", val, re.IGNORECASE):
+            logger.info(
+                f"[DEBUG] _browse_result_language_code() matched metadata {key}: '{val}'"
+            )
+            return val
+    for key in ("matched_source", "source"):
+        val = str(found.get(key) or "").strip()
+        logger.info(f"[DEBUG] _browse_result_language_code() inspecting {key}: {val!r}")
+        m = re.search(r"wikipedia\s*\(([a-zA-Z_\-]+)\)", val, re.IGNORECASE)
+        if m:
+            extracted = m.group(1).replace("_", "-").lower()
+            logger.info(
+                f"[DEBUG] _browse_result_language_code() matched {key}: '{extracted}'"
+            )
+            return extracted
+    url = str(found.get("url") or "").strip()
+    logger.info(f"[DEBUG] _browse_result_language_code() inspecting url: {url!r}")
+    m_url = re.search(r"https?://([a-zA-Z_\-]+)\.wikipedia\.org", url, re.IGNORECASE)
+    if m_url:
+        extracted = m_url.group(1).replace("_", "-").lower()
+        logger.info(f"[DEBUG] _browse_result_language_code() matched url: '{extracted}'")
+        return extracted
+    logger.info("[DEBUG] _browse_result_language_code() no language code extracted")
+    return ""
+
+
+def _browse_result_needs_ai_organization(
+    found: Optional[Dict[str, Any]], raw_text: str
+) -> bool:
+    """[DEPRECATED - Phase 49]
+
+    Previously used to decide if browse content needs formatting via AI.
+    No longer called — browser content is returned as-is (content is already well-formatted).
+    Kept for backward compatibility. Always returns False.
+    """
+    return False  # Disabled in Phase 49 — no AI organization for browse content
+
+
+async def _automatic_browse_answer(
+    user_id: int, query: str, lang_hint: str, no_api_mode: bool, *, command: str = "chat"
+) -> str:
+    """Phase 47: ডাটাবেজে সরাসরি উত্তর না পেলে স্বয়ংক্রিয় (automatic) Browse Search চালায়।
+
+    এটাই এখন **সব হ্যান্ডলারের** (chat/joke/quote/translate/grammar/rewrite/tone/summarize)
+    দ্বিতীয় ধাপ — কোনো আলাদা /search কমান্ডের দরকার নেই। খোঁজার ক্রম সবসময়:
+    💾 Database → 🌐 Browser Search → 🔵 Groq API। এই ফাংশন শুধু Browser ধাপটা করে:
+
+      - `browse_web_search()`: Tavily Real Web Search (Key থাকলে, Phase 48) →
+        DuckDuckGo Instant Answer → Wikipedia (ইউজারের ভাষা) → Wikipedia (en)।
+      - No API Call Mode বন্ধ থাকলে: শুধু ব্রাউজার ফলাফলের ভাষা ইউজারের ভাষার সাথে না মিললে
+        AI-কে ছোট্ট একটা translate কল করা হয় (তখন ব্যাজ 🔄 Hybrid: 🌐 Browser + 🔵 Groq)।
+        একই ভাষার clean ব্রাউজার ফলাফল সরাসরি ফেরত যায় (🌐 Browser) — কোনো AI কল ছাড়াই।
+      - No API Call Mode চালু থাকলে: কোনো AI কল ছাড়াই কাঁচা তথ্যটাই যায় (🌐 Browser)।
+
+    উত্তরের নিচে উৎস-ব্যাজ যুক্ত হয় — কোন সোর্স থেকে এসেছে, কোন কোন সোর্স চেক করা হয়েছিল,
+    মূল লিংক ও নির্ভুলতা সবসহ। ব্যাজ বন্ধ/অনুপলব্ধ থাকলে Phase 44-এর পুরোনো উৎস-ফুটার দেখানো হয়
+    (তথ্য হারায় না)। ওয়েবে কিছু না পেলে খালি স্ট্রিং রিটার্ন হয় — caller তখন নিজের পরের
+    (🔵 Groq API) fallback ব্যবহার করবে। কোনো ধাপেই এই ফাংশন এক্সসেপশন ছুঁড়ে না।
+    """
+    try:
+        query = (query or "").strip()
+        if not query:
+            return ""
+
+        found = await browse_web_search(query, lang_hint=lang_hint)
+        raw_text = ((found or {}).get("text") or "").strip()
+        if not found or not raw_text:
+            return ""
+
+        organized_by_ai = False
+        final_text = raw_text
+
+        if not no_api_mode:
+            target_lang_code = _browse_target_wikipedia_lang(lang_hint)
+            source_lang_code = _browse_result_language_code(found)
+            raw_lang_code = source_lang_code or detect_language(raw_text)
+
+            # Phase 49: Only organize with AI if actual language translation is needed
+            # DO NOT call AI for formatting/beautification of already-clean content
+            if raw_lang_code != target_lang_code:
+                # Language mismatch: translate to user's language
+                try:
+                    translate_prompt = (
+                        "আপনি একজন ভাষা অনুবাদক। নিচের পাঠ্যটি সঠিকভাবে অনুবাদ করুন, "
+                        "অন্য কোনো পরিবর্তন করবেন না। নতুন তথ্য যোগ করবেন না।"
+                    )
+                    ai_result = (
+                        await ask_ai(translate_prompt, raw_text, use_cache=False, user_id=user_id)
+                    ).strip()
+                    if ai_result:
+                        final_text = ai_result
+                        organized_by_ai = True
+                except Exception as e:
+                    logger.info("Browse result translation failed, using original: %s", e)
+
+        metadata = metadata_from_browse_result(found, organized_by_ai=organized_by_ai, query=query)
+
+        badged = attach_source_badge(final_text, metadata, command, attribution_lang(user_id))
+        if badged == final_text:
+            # Attribution বন্ধ/অনুপলব্ধ — Phase 44-এর পুরোনো উৎস-ফুটারই দেখানো হচ্ছে।
+            badged = final_text + legacy_browse_footer(
+                found.get("source", "") or "ওয়েব সার্চ",
+                found.get("url", "") or "",
+                found.get("tried_sources") or [],
+            )
+        return badged
+    except Exception as e:
+        logger.warning("Phase 47 automatic Browse Search সম্পূর্ণ ব্যর্থ, পরের fallback ব্যবহার হবে: %s", e)
+        return ""
+
+
+def _browse_lang_hint(user_id: int, text: str) -> str:
+    """ব্রাউজার সার্চের ভাষা-ইঙ্গিত — ইউজার /setlang দিয়ে ভাষা বেছে থাকলে সেটা,
+    নাহলে টেক্সট থেকে শনাক্ত করা ভাষা (Wikipedia-র ভাষা ও গুছিয়ে লেখার ভাষা বেছে নিতে ব্যবহার হয়)।"""
+    manual_lang, is_manual = get_effective_language(user_id)
+    if is_manual:
+        return UI_LANG_CHOICES.get(manual_lang, manual_lang)
+    return language_display_name(detect_language(text))
+
+
+# ============================= Phase 47: Source Attribution (উৎস নির্দেশনা) =============================
+# উদ্দেশ্য: ইউজার যেন প্রতিটা তথ্যবহ উত্তরের নিচে স্পষ্ট দেখতে পায় তথ্যটা **কোথা থেকে** এসেছে —
+#   🔵 Groq API      → LLM (Groq/OpenRouter/Cerebras) দিয়ে তৈরি লেখা
+#   🌐 Browser Search → লাইভ ওয়েব সার্চ (Phase 44-এর DuckDuckGo Instant Answer / Wikipedia)
+#   💾 Database      → বটের নিজের Brain OS (Knowledge/Pattern/Template Engine) বা Response Cache
+#   🔄 Hybrid        → একাধিক সোর্স মিলিয়ে (যেমন Browser-এর কাঁচা তথ্য Groq দিয়ে গুছিয়ে লেখা)
+#
+# আসল লজিক (badge তৈরি, confidence level, ফরম্যাট, per-command সেটিংস) আছে
+# `rohan_bot/utils/source_tracker.py` + `rohan_bot/config.py`-তে — ওগুলো Telegram/AI/DB থেকে
+# সম্পূর্ণ স্বাধীন, তাই আলাদাভাবে দ্রুত unit-test করা যায় (tests/test_source_attribution.py)।
+# main.py এখান থেকে শুধু দুটো হেল্পার ব্যবহার করে: make_source_metadata() ও attach_source_badge()।
+#
+# গুরুত্বপূর্ণ (নিরাপত্তা): rohan_bot/ প্যাকেজটা কোনো কারণে import না হলে (যেমন শুধু main.py
+# কপি করে চালানো হলে) বট ভাঙবে না — SOURCE_ATTRIBUTION_AVAILABLE False হয়ে যাবে, তখন ব্যাজ
+# ছাড়াই আগের মতো উত্তর যাবে। তাই পুরোনো কোনো কমান্ডের আচরণ কখনো ভাঙে না।
+#
+# Environment override (Render/Replit Secrets — সবগুলো ঐচ্ছিক):
+#   SOURCE_ATTRIBUTION_ENABLED=false          → পুরো ফিচার বন্ধ
+#   SOURCE_ATTRIBUTION_FORMAT=full            → ডিফল্ট ব্যাজ ফরম্যাট (minimal/compact/full/detailed)
+#   SOURCE_ATTRIBUTION_LANG=en                → ব্যাজের ভাষা (ডিফল্ট bn)
+#   SOURCE_ATTRIBUTION_DISABLED_COMMANDS=joke,quote   → নির্দিষ্ট কমান্ডের ব্যাজ বন্ধ
+#   SOURCE_ATTRIBUTION_ENABLED_COMMANDS=ocr           → নির্দিষ্ট কমান্ডের ব্যাজ চালু
+
+SOURCE_ATTRIBUTION_MIN_OVERHEAD_MS = 10  # ডিজাইন লক্ষ্য: ব্যাজ যোগ করতে এর বেশি সময় লাগা যাবে না
+
+
+def _load_source_tracker():
+    """`rohan_bot.utils.source_tracker` মডিউলটা খুঁজে বের করে import করে; না পারলে None।
+
+    main.py repo-root-এ থাকে, তাই সাধারণত `import rohan_bot...` সরাসরিই কাজ করে। কিন্তু
+    টেস্ট/ডিপ্লয়মেন্টে main.py আলাদা ডিরেক্টরিতে কপি হতে পারে — তখন main.py-এর নিজের
+    অবস্থান (বা তার প্যারেন্ট, অথবা cwd) থেকে প্যাকেজটা খোঁজা হয়। কোথাও না পেলে None
+    ফেরত যায় এবং source attribution নিজে থেকে বন্ধ থাকে (বট চলতে কোনো সমস্যা হয় না)।
+    """
+    import importlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    for root in (here, os.path.dirname(here), os.getcwd()):
+        if not root:
+            continue
+        if os.path.isdir(os.path.join(root, "rohan_bot", "utils")):
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            break
+    try:
+        return importlib.import_module("rohan_bot.utils.source_tracker")
+    except Exception as exc:  # pragma: no cover - প্যাকেজ না থাকলে বট যাতে না ভাঙে
+        logger.warning(
+            "Phase 47: rohan_bot.utils.source_tracker import করা যায়নি (%s) — "
+            "source attribution বন্ধ থাকবে, বাকি সব ফিচার আগের মতোই চলবে।",
+            exc,
+        )
+        return None
+
+
+_source_tracker = _load_source_tracker()
+
+#: প্যাকেজ পাওয়া গেছে কিনা — False হলে নিচের সব হেল্পার নিষ্ক্রিয় (no-op) হয়ে যায়।
+SOURCE_ATTRIBUTION_AVAILABLE = _source_tracker is not None
+
+
+def source_attribution_settings() -> Dict[str, Any]:
+    """কার্যকর attribution কনফিগ (env override সহ) ফেরত দেয়; প্যাকেজ না থাকলে বন্ধ-কনফিগ।"""
+    if _source_tracker is None:
+        return {"enabled": False, "format": "compact", "lang": "bn", "commands": {}, "confidence": {}}
+    try:
+        return _source_tracker.load_settings()
+    except Exception:  # pragma: no cover - প্রতিরক্ষামূলক
+        return {"enabled": False, "format": "compact", "lang": "bn", "commands": {}, "confidence": {}}
+
+
+def source_attribution_enabled(command: str = "") -> bool:
+    """পুরো ফিচার এবং নির্দিষ্ট কমান্ডের জন্য ব্যাজ চালু আছে কিনা।"""
+    if not SOURCE_ATTRIBUTION_AVAILABLE:
+        return False
+    settings = source_attribution_settings()
+    if not settings.get("enabled", True):
+        return False
+    try:
+        return bool(_source_tracker.resolve_command_settings(command, settings).get("enabled", True))
+    except Exception:  # pragma: no cover - প্রতিরক্ষামূলক
+        return False
+
+
+def make_source_metadata(
+    source: str,
+    *,
+    confidence: Optional[float] = None,
+    urls: Optional[Sequence[str]] = None,
+    secondary: Optional[Sequence[str]] = None,
+    cache_hit: bool = False,
+    note: str = "",
+    breakdown: Optional[Dict[str, float]] = None,
+    timestamp: Optional[datetime] = None,
+    checked_sources: Optional[Sequence[str]] = None,
+    query: str = "",
+):
+    """একটা উত্তরের জন্য source metadata বানায় (প্যাকেজ না থাকলে/ভুল ইনপুটে None)।
+
+    Args:
+        source: ``"groq"`` | ``"browser"`` | ``"database"`` | ``"hybrid"`` (ইমোজি/পূর্ণ নামও চলে)।
+        confidence: 0.0–1.0; না দিলে সোর্সভেদে ডিফল্ট।
+        urls: মূল সোর্সের লিংক।
+        secondary: অতিরিক্ত উৎসের তালিকা — থাকলে উত্তর 🔄 Hybrid হিসেবে দেখানো হয়।
+        cache_hit: ক্যাশ/ডাটাবেজ থেকে সরাসরি এসেছে কিনা।
+        note: ছোট ব্যাখ্যা (যেমন "Response Cache")।
+        breakdown: detailed ব্যাজের শতাংশ ভাগ।
+        timestamp: উৎসের নিজস্ব সময় (DB রেকর্ডের last-updated ইত্যাদি)।
+        checked_sources: কোন কোন সোর্স চেষ্টা করা হয়েছিল।
+        query: ইউজারের মূল প্রশ্ন।
+
+    Returns:
+        SourceMetadata | None: ব্যাজ বানানো সম্ভব না হলে None (তখন উত্তর অপরিবর্তিত থাকে)।
+    """
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.build_metadata(
+            source,
+            confidence_score=confidence,
+            urls=urls,
+            secondary_sources=secondary,
+            cache_hit=cache_hit,
+            note=note,
+            breakdown=breakdown,
+            timestamp=timestamp,
+            checked_sources=checked_sources,
+            query=query,
+        )
+    except Exception as exc:
+        logger.debug("Phase 47: source metadata বানানো যায়নি (%s): %s", source, exc)
+        return None
+
+
+def metadata_from_browse_result(found: Optional[Dict[str, Any]], *, organized_by_ai: bool = False, query: str = ""):
+    """`browse_web_search()`-এর ফলাফল থেকে metadata বানায় (URL + চেক-করা সোর্সসহ)।"""
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.metadata_from_browse_result(
+            found, organized_by_ai=organized_by_ai, query=query
+        )
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: browse metadata বানানো যায়নি: %s", exc)
+        return None
+
+
+def metadata_from_decision(decision: Optional[Dict[str, Any]], *, query: str = ""):
+    """Brain OS-এর direct উত্তরের জন্য 💾 Database metadata বানায়।"""
+    if _source_tracker is None:
+        return None
+    try:
+        return _source_tracker.metadata_from_decision(decision, query=query)
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: decision metadata বানানো যায়নি: %s", exc)
+        return None
+
+
+def attribution_lang(user_id: int) -> str:
+    """ব্যাজের ভাষা — ইউজার বাংলা (বা Auto) বেছে নিলে ``"bn"``, নইলে ``"en"``।
+
+    বটের বাকি UI-এর মতোই /setlang-এর পছন্দ মানে; তবে badge-এর স্ট্যাটিক লেবেল শুধু
+    বাংলা/ইংরেজিতেই আছে (অন্য ভাষার জন্য ইংরেজি লেবেল ব্যবহার হয়)।
+    """
+    try:
+        lang, manual = get_effective_language(user_id)
+    except Exception:  # pragma: no cover - DB সমস্যায় ব্যাজ যেন বট না ভাঙায়
+        return "bn"
+    if not manual:
+        return "bn"
+    return "bn" if str(lang or "bn").lower().startswith("bn") else "en"
+
+
+def attach_source_badge(text: str, metadata, command: str, lang_code: str = "bn") -> str:
+    """উত্তরের সাথে উৎস-ব্যাজ যুক্ত করে; কোনো কারণে সম্ভব না হলে মূল লেখাই ফেরত দেয়।
+
+    এই ফাংশন কখনো exception তোলে না — source tracking-এর কারণে চ্যাট-ফ্লো ভাঙা যাবে না।
+    """
+    body = text or ""
+    if metadata is None or _source_tracker is None:
+        return body
+    if not source_attribution_enabled(command):
+        return body
+    try:
+        return _source_tracker.format_with_source(
+            body, metadata, lang=lang_code or "bn", command=command
+        )
+    except Exception as exc:  # pragma: no cover - প্রতিরক্ষামূলক
+        logger.debug("Phase 47: ব্যাজ যুক্ত করা যায়নি (%s): %s", command, exc)
+        return body
+
+
+def legacy_browse_footer(source: str, url: str, tried_sources: Optional[Sequence[str]] = None) -> str:
+    """Phase 44-এর পুরোনো উৎস-ফুটার — শুধু তখন ব্যবহার হয় যখন attribution ব্যাজ বন্ধ থাকে।
+
+    এতে ফিচার বন্ধ থাকলেও ইউজার আগের মতোই সোর্স-লিংক ও "চেক করা হয়েছে" তালিকা দেখতে পান
+    (অর্থাৎ attribution বন্ধ করা মানে তথ্য হারানো নয়)।
+    """
+    footer = ""
+    if url:
+        footer += f"\n\n🔗 উৎস: {url}"
+    elif source:
+        footer += f"\n\n📚 উৎস: {source}"
+    if tried_sources:
+        footer += "\n🔎 চেক করা হয়েছে: " + " → ".join(tried_sources)
+    return footer
+
+
+def _cache_hit_marker(system_prompt: str, user_text: str) -> bool:
+    """Response Cache-এ এই (prompt, text) জোড়া আগে থেকে আছে কিনা — শুধু পড়ে, কিছু বদলায় না।
+
+    `ask_ai(..., use_cache=True)` কল করার **আগে** ডাকতে হয়; তাহলে উত্তরটা আসল AI কল থেকে
+    এসেছে নাকি 💾 Database/Cache থেকে, সেটা source badge-এ ঠিকভাবে দেখানো যায়।
+    """
+    try:
+        return ai_response_cache._store.get(ai_response_cache.make_key(system_prompt, user_text)) is not None
+    except Exception:  # ক্যাশের অভ্যন্তরীণ গঠন বদলালেও ব্যাজ যেন বট না ভাঙায়
+        return False
+
+
+def _ai_source_metadata(system_prompt: str, user_text: str, *, confidence: float = 0.90, note: str = ""):
+    """`ask_ai(..., use_cache=True)` কলার জন্য metadata — cache hit হলে 💾, নইলে 🔵।"""
+    if _cache_hit_marker(system_prompt, user_text):
+        return make_source_metadata(
+            "database", confidence=max(0.60, confidence), cache_hit=True,
+            note=note or "Response Cache", query=user_text,
+        )
+    return make_source_metadata("groq", confidence=confidence, note=note, query=user_text)
 
 
 def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
@@ -7373,7 +7987,7 @@ def build_no_api_stuck_message(decision: Dict[str, Any]) -> str:
         # ফ্রি Browse Search (DuckDuckGo → Wikipedia) অবশ্যই চেষ্টা হয়েছিল কিন্তু কিছুই মেলেনি।
         browse_note = (
             "\n🔎 এর মাঝে ফ্রি Browse Search-ও চেষ্টা করা হয়েছিল "
-            "(DuckDuckGo Instant Answer → Wikipedia বাংলা → Wikipedia English) কিন্তু কোথাও "
+            "(Tavily → DuckDuckGo Instant Answer → Wikipedia বাংলা → Wikipedia English) কিন্তু কোথাও "
             "এই প্রশ্নের উত্তর পাওয়া যায়নি।\n"
         )
     return (
@@ -7491,9 +8105,15 @@ def _brain_get_live_context(user_id: int) -> str:
 
 
 async def _phase17_decide(user_id: int, user_text: str) -> Dict[str, Any]:
-    """Run Decision Engine safely. Any Brain OS failure returns a normal AI route."""
+    """Run Decision Engine safely. Any Brain OS failure returns a normal AI route.
+
+    Phase 48: time-sensitive প্রশ্নে ("বর্তমান প্রধানমন্ত্রী কে", "দাম কত", "স্কোর" ইত্যাদি)
+    Step 1 (Database cache) স্কিপ হয় — Decision Engine direct বললেও strategy "ai" করে
+    দেওয়া হয়, যাতে পুরনো cached উত্তর না গিয়ে ফ্লো Step 2 (Browse Search — এখন সবার
+    আগে Tavily Real Web Search)-এ যায় এবং তাজা তথ্য আনা যায়।
+    """
     try:
-        return await decision_engine_service.execute_async(
+        decision = await decision_engine_service.execute_async(
             user_text, user_id=user_id, session_key=str(user_id)
         )
     except Exception as e:
@@ -7506,6 +8126,14 @@ async def _phase17_decide(user_id: int, user_text: str) -> Dict[str, Any]:
             "fallback": "ai",
             "phase17_error": True,
         }
+    if decision.get("strategy") == "direct" and _is_time_sensitive_query(user_text):
+        # সময়-সংবেদনশীল প্রশ্ন — cached (সম্ভবত পুরোনো) উত্তর বিশ্বাস করা যায় না।
+        brain_os_metrics["time_sensitive_skips"] += 1
+        decision = dict(decision)
+        decision["strategy"] = "ai"
+        decision["time_sensitive"] = True
+        logger.info(f"[Phase 48] time-sensitive প্রশ্ন — Step 1 (Database) স্কিপ | query: {user_text!r}")
+    return decision
 
 
 def build_brain_status_text() -> str:
@@ -7531,7 +8159,10 @@ def build_brain_status_text() -> str:
         f"AI route হয়েছে: {ai_routes} বার\n"
         f"No API Call Mode-এ আটকে গিয়ে ইউজারের কাছে তথ্য চাওয়া হয়েছে (সব ইউজার মিলিয়ে): "
         f"{int(brain_os_metrics.get('no_api_stuck', 0))} বার\n"
-        f"🌐 Phase 44 Browse Search দিয়ে উত্তর দেওয়া হয়েছে: {int(brain_os_metrics.get('browse_answers', 0))} বার"
+        f"🌐 Phase 44 Browse Search দিয়ে উত্তর দেওয়া হয়েছে: {int(brain_os_metrics.get('browse_answers', 0))} বার\n"
+        f"🏷️ Source Attribution: "
+        + ("✅ চালু (ডিফল্ট ফরম্যাট: " + str(source_attribution_settings().get('format')) + ")"
+           if source_attribution_enabled("chat") else "⛔ বন্ধ")
     ) + (build_phase27_status_text() if "build_phase27_status_text" in globals() else "")
 
 
@@ -8127,46 +8758,61 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             system_prompt += "\n\nআগের দরকারি Brain OS context:\n" + live_context
 
         decision = await _phase17_decide(user_id, user_text)
-        direct_answer = ""
+
+        # Step 1: 💾 Database — Brain OS-এর নিজের Knowledge/Pattern/Template/Documentation
+        # Engine (Decision Engine) সরাসরি নিশ্চিত উত্তর দিতে পারলে সেটাই (ব্যাজসহ) ফেরত যায়।
         if decision.get("strategy") == "direct":
             direct_answer = _brain_payload_to_answer(decision.get("payload"))
             if direct_answer:
                 brain_os_metrics["direct_answers"] += 1
-            else:
-                brain_os_metrics["direct_failures"] += 1
+                if memory_enabled:
+                    save_message(user_id, "user", user_text)
+                    save_message(user_id, "assistant", direct_answer)
+                reply = attach_source_badge(
+                    direct_answer,
+                    metadata_from_decision(decision, query=user_text),
+                    "chat",
+                    attribution_lang(user_id),
+                )
+                await send_long_text(update, reply)
+                return
+            brain_os_metrics["direct_failures"] += 1
 
         no_api_mode = is_no_api_mode(user_id)
 
-        # Phase 44: Brain OS নিজের ডাটাবেজে (Knowledge/Pattern/Template/Documentation Engine)
-        # সরাসরি উত্তর না পেলে (stage == "ai"), AI API কল করার আগে একবার ফ্রি Browse Search
-        # (DuckDuckGo/Wikipedia) চেষ্টা করা হয়। পেলে সেটাই (দরকার হলে AI দিয়ে গুছিয়ে) ইউজারকে
-        # দেওয়া হয় ও নিজের Knowledge Engine-এ যুক্ত হয়ে যায়। কিছু না পেলে নিচের স্বাভাবিক AI
-        # fallback আগের মতোই চলবে।
-        browse_answer = ""
-        if not direct_answer and decision.get("stage") == "ai":
-            browse_answer = await _phase44_browse_and_answer(user_id, user_text, lang_name, no_api_mode)
-            if browse_answer:
-                brain_os_metrics["browse_answers"] += 1
+        # Step 2: 🌐 Browser Search — ডাটাবেজে না পেলে স্বয়ংক্রিয় (automatic, কোনো আলাদা
+        # কমান্ড ছাড়াই) আগে Tavily Real Web Search (Key থাকলে), তারপর
+        # DuckDuckGo/Wikipedia-তে খোঁজা হয়; পেলে সেটাই (দরকার হলে AI দিয়ে গুছিয়ে,
+        # ব্যাজসহ) ফেরত যায় এবং নিজের Knowledge Engine-এ সেভ হয়।
+        browse_answer = await _automatic_browse_answer(user_id, user_text, lang_name, no_api_mode)
+        if browse_answer:
+            brain_os_metrics["browse_answers"] += 1
+            if memory_enabled:
+                save_message(user_id, "user", user_text)
+                save_message(user_id, "assistant", browse_answer)
+            if not no_api_mode and should_show_own_key_hint(user_id):
+                browse_answer += build_own_api_key_hint(user_id)
+            await send_long_text(update, browse_answer)
+            return
 
-        if direct_answer:
-            reply = direct_answer
-        elif browse_answer:
-            reply = browse_answer
-        elif no_api_mode:
+        # Step 3: 🔵 Groq API — ডাটাবেজ ও ব্রাউজার কোনোটাতেই না পেলে শেষ ধাপে AI API।
+        if no_api_mode:
             # Phase 43: No API Call Mode চালু — Brain OS/Browse Search কোনোটাই সরাসরি উত্তর
             # দিতে পারেনি, তাই AI-কে (memory/cache কোনো পথেই) কল না করে ইউজারকে জানানো হচ্ছে
             # কোথায় আটকে গেছে।
             brain_os_metrics["no_api_stuck"] += 1
             reply = build_no_api_stuck_message(decision)
+            source_meta = None
         elif memory_enabled:
             # Memory চালু থাকলে উত্তর কথোপকথনের ইতিহাসের উপর নির্ভরশীল, তাই শেয়ার্ড ক্যাশ
-            # নিরাপদ নয় (একজনের কথোপকথন-প্রেক্ষিতের উত্তর অন্যজন/অন্য প্রসঙ্গে পেয়ে যেতে
-            # পারে) — এই পথে সবসময় সরাসরি AI-কে জিজ্ঞেস করা হয়, আগের মতোই।
+            # নিরাপদ নয় — এই পথে সবসময় সরাসরি AI-কে জিজ্ঞেস করা হয়, আগের মতোই।
             brain_os_metrics["ai_routes"] += 1
             history_limit = MEMORY_HISTORY_LIMIT_PREMIUM if is_premium_active(user_id) else MEMORY_HISTORY_LIMIT
             history = get_recent_history(user_id, limit=history_limit)
             # Phase 45: user_id দেওয়া হচ্ছে — নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে।
             reply = await ask_ai_with_history(system_prompt, history, user_text, user_id=user_id)
+            # Phase 47: Memory-পথে শেয়ার্ড ক্যাশ ব্যবহার হয় না, তাই এটা সবসময়ই তাজা 🔵 AI উত্তর।
+            source_meta = make_source_metadata("groq", confidence=0.90, query=user_text)
             save_message(user_id, "user", user_text)
             save_message(user_id, "assistant", reply)
             # Phase 44: Browse Search-এও কিছু না পেয়ে AI API কল করে যে উত্তর পাওয়া গেল, সেটাও
@@ -8181,26 +8827,31 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if cached_reply is not None:
                 reply = cached_reply
                 brain_os_metrics["direct_answers"] += 1
+                # Phase 47: ক্যাশ-হিট মানে তথ্যটা 💾 নিজের ডাটাবেজ/ক্যাশ থেকে এসেছে, AI কল হয়নি।
+                source_meta = make_source_metadata(
+                    "database", confidence=0.90, cache_hit=True,
+                    note="General Chat Cache", query=user_text,
+                )
             else:
                 brain_os_metrics["ai_routes"] += 1
                 # Phase 45: user_id দেওয়া হচ্ছে — নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে।
                 reply = await ask_ai(system_prompt, user_text, user_id=user_id)
                 await general_chat_cache.set(lang_name, cache_key_text, reply)
+                source_meta = make_source_metadata("groq", confidence=0.90, query=user_text)
                 # Phase 44: এই AI উত্তরও নিজে থেকে Knowledge Engine-এ যুক্ত হয়ে যায়।
                 _phase44_save_ai_knowledge(user_text, reply)
-
-        # Direct Brain OS ও Browse Search-এর উত্তরও স্বাভাবিক চ্যাট মেমরিতে থেকে যাওয়া উচিত।
-        if (direct_answer or browse_answer) and memory_enabled:
-            save_message(user_id, "user", user_text)
-            save_message(user_id, "assistant", reply)
 
         # Phase 45: Brain OS নিজে থেকে উত্তর দিতে পারেনি (তাই Browse/AI resource ব্যবহার হয়েছে)
         # এবং ইউজারের নিজস্ব API Key নেই — এমন ক্ষেত্রে দিনে একবার নিজস্ব Key যুক্ত করার
         # অনুস্মারক জুড়ে দেওয়া হয় (বেশি বিরক্তিকর না করার জন্য প্রতিবার নয়)।
-        if reply and not direct_answer and not no_api_mode and should_show_own_key_hint(user_id):
+        if reply and not no_api_mode and should_show_own_key_hint(user_id):
             reply += build_own_api_key_hint(user_id)
 
-        await update.message.reply_text(reply)
+        # Phase 47: সবার শেষে উৎস-ব্যাজ বসে — উপরে চ্যাট-মেমরিতে যা সেভ হয়েছে তা ব্যাজ ছাড়াই
+        # থাকে (ইতিহাসে অপ্রয়োজনীয় লেখা ঢোকে না), আর ব্যাজ বন্ধ/অনুপলব্ধ থাকলে reply অপরিবর্তিত।
+        reply = attach_source_badge(reply, source_meta, "chat", attribution_lang(user_id))
+
+        await send_long_text(update, reply)
     except Exception as e:
         logger.error(f"চ্যাট/Brain OS এরর: {e}")
         # Phase 43: No API Call Mode চালু থাকলে এই legacy fallback-ও AI কল করবে না —
@@ -8227,7 +8878,16 @@ async def chat_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 brain_os_metrics["ai_routes"] += 1
                 # Phase 44: legacy fallback পথেও AI উত্তর নিজে থেকে Knowledge Engine-এ সেভ হয়।
                 _phase44_save_ai_knowledge(user_text, reply)
-                await update.message.reply_text(reply)
+                # Phase 47: এই পথের উত্তরও 🔵 Groq API থেকে আসে, তাই ব্যাজ একই রকম।
+                await send_long_text(
+                    update,
+                    attach_source_badge(
+                        reply,
+                        make_source_metadata("groq", confidence=0.85, query=user_text, note="Legacy fallback"),
+                        "chat",
+                        attribution_lang(user_id),
+                    ),
+                )
             except Exception as fallback_error:
                 logger.error(f"Legacy AI fallback-ও ব্যর্থ: {fallback_error}")
                 await update.message.reply_text(await localize(user_id, "দুঃখিত, উত্তর দিতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"))
@@ -8309,17 +8969,46 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     target_lang = context.args[0]
     text = " ".join(context.args[1:])
+    user_id = update.effective_user.id
+    system_prompt = (
+        f"তুমি একজন অনুবাদক। ইউজারের লেখাটা {target_lang} ভাষায় অনুবাদ করো। শুধু অনুবাদটাই লিখবে, অন্য কিছু লিখবে না।"
+    )
     try:
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        # Step 1: Database/cache — একই (ভাষা, লেখা) আগে অনুবাদ করা থাকলে সরাসরি ক্যাশ থেকে।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.92, cache_hit=True,
+                note=f"অনুবাদ → {target_lang}", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "translate", attribution_lang(user_id)))
+            return
+
+        # Step 2: Browser Search (automatic, /search কমান্ড ছাড়াই)।
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="translate"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
+        # Step 3: Groq API fallback (Phase 10: cache-এও সেভ হয়)।
         reply = await ask_ai(
-            f"তুমি একজন অনুবাদক। ইউজারের লেখাটা {target_lang} ভাষায় অনুবাদ করো। শুধু অনুবাদটাই লিখবে, অন্য কিছু লিখবে না।",
+            system_prompt,
             text,
             use_cache=True,  # Phase 10: একই ভাষায় একই লেখা আগে অনুবাদ করা থাকলে ক্যাশ থেকে দেওয়া হবে
-            user_id=update.effective_user.id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
+            user_id=user_id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
         )
-        await update.message.reply_text(reply)
+        metadata = make_source_metadata("groq", confidence=0.92, note=f"অনুবাদ → {target_lang}", query=text)
+        await send_long_text(update, attach_source_badge(reply, metadata, "translate", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"অনুবাদ এরর: {e}")
-        await update.message.reply_text("দুঃখিত, অনুবাদ করতে সমস্যা হয়েছে।")
+        await update.message.reply_text(
+            await localize(user_id, "দুঃখিত, অনুবাদ করতে সমস্যা হয়েছে।")
+        )
 
 
 async def grammar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8329,17 +9018,39 @@ async def grammar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("এভাবে লিখুন: /grammar আপনার লেখা")
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখার ভুল ঠিক করো (বানান, গ্রামার)। শুধু ঠিক করা লেখাটাই ফেরত দাও, অন্য কিছু বলবে না।"
     try:
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.92, cache_hit=True,
+                note="গ্রামার চেক", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "grammar", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="grammar"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
         reply = await ask_ai(
-            "তুমি লেখার ভুল ঠিক করো (বানান, গ্রামার)। শুধু ঠিক করা লেখাটাই ফেরত দাও, অন্য কিছু বলবে না।",
+            system_prompt,
             text,
             use_cache=True,  # Phase 10: একই লেখা আগে গ্রামার চেক করা থাকলে ক্যাশ থেকে দেওয়া হবে
-            user_id=update.effective_user.id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
+            user_id=user_id,  # Phase 45: নিজস্ব API Key থাকলে সেটাই ব্যবহার হবে
         )
-        await update.message.reply_text(reply)
+        metadata = make_source_metadata("groq", confidence=0.92, note="গ্রামার চেক", query=text)
+        await send_long_text(update, attach_source_badge(reply, metadata, "grammar", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"গ্রামার এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def rewrite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8349,15 +9060,36 @@ async def rewrite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("এভাবে লিখুন: /rewrite আপনার লেখা")
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখাটা একই অর্থ রেখে নতুনভাবে সুন্দর করে লেখো।"
     try:
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.90, cache_hit=True, note="রিরাইট", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "rewrite", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="rewrite"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
         reply = await ask_ai(
-            "তুমি লেখাটা একই অর্থ রেখে নতুনভাবে সুন্দর করে লেখো।", text,
-            use_cache=True, user_id=update.effective_user.id,
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        metadata = make_source_metadata("groq", confidence=0.90, note="রিরাইট", query=text)
+        await send_long_text(update, attach_source_badge(reply, metadata, "rewrite", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"রিরাইট এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def tone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8368,15 +9100,37 @@ async def tone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tone_type = context.args[0]
     text = " ".join(context.args[1:])
+    user_id = update.effective_user.id
+    system_prompt = f"তুমি লেখাটাকে {tone_type} (আনুষ্ঠানিক/অনানুষ্ঠানিক) স্টাইলে বদলে দাও।"
     try:
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.90, cache_hit=True,
+                note=f"টোন → {tone_type}", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "tone", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="tone"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
         reply = await ask_ai(
-            f"তুমি লেখাটাকে {tone_type} (আনুষ্ঠানিক/অনানুষ্ঠানিক) স্টাইলে বদলে দাও।", text,
-            use_cache=True, user_id=update.effective_user.id,
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
         )
-        await update.message.reply_text(reply)
+        metadata = make_source_metadata("groq", confidence=0.90, note=f"টোন → {tone_type}", query=text)
+        await send_long_text(update, attach_source_badge(reply, metadata, "tone", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"টোন এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8386,17 +9140,43 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and update.message.reply_to_message and update.message.reply_to_message.text:
         text = update.message.reply_to_message.text
     if not text:
-        await update.message.reply_text("কোনো মেসেজে রিপ্লাই দিয়ে /summarize লিখুন, অথবা /summarize এর পর লেখা দিন।")
-        return
-    try:
-        reply = await ask_ai(
-            "তুমি লেখাটার সংক্ষিপ্ত সারমর্ম বাংলায় লিখে দাও।", text,
-            use_cache=True, user_id=update.effective_user.id,
+        await update.message.reply_text(
+            await localize(
+                update.effective_user.id,
+                "কোনো মেসেজে রিপ্লাই দিয়ে /summarize লিখুন, অথবা /summarize এর পর লেখা দিন।",
+            )
         )
-        await update.message.reply_text(reply)
+        return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি লেখাটার সংক্ষিপ্ত সারমর্ম বাংলায় লিখে দাও।"
+    try:
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.90, cache_hit=True, note="সারসংক্ষেপ", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "summarize", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="summarize"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
+        reply = await ask_ai(
+            system_prompt, text,
+            use_cache=True, user_id=user_id,
+        )
+        metadata = make_source_metadata("groq", confidence=0.90, note="সারসংক্ষেপ", query=text)
+        await send_long_text(update, attach_source_badge(reply, metadata, "summarize", attribution_lang(user_id)))
     except Exception as e:
         logger.error(f"সামারি এরর: {e}")
-        await update.message.reply_text("দুঃখিত, সমস্যা হয়েছে।")
+        await update.message.reply_text(await localize(user_id, "দুঃখিত, সমস্যা হয়েছে।"))
 
 
 # ============================= PDF ফিচার =============================
@@ -8467,8 +9247,11 @@ async def send_long_text(update: Update, text: str):
     text = text.strip()
     if not text:
         return
+    msg = update.message or update.effective_message
+    if not msg:
+        return
     for i in range(0, len(text), TELEGRAM_MAX_MSG_LEN):
-        await update.message.reply_text(text[i:i + TELEGRAM_MAX_MSG_LEN])
+        await msg.reply_text(text[i:i + TELEGRAM_MAX_MSG_LEN])
 
 
 async def pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9525,27 +10308,69 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await quota_guard(update, action="joke"):
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি একটা মজার, শালীন বাংলা জোক বলো। ছোট রাখবে।"
+    text = "একটা জোক বলো"
+    metadata = None
     try:
-        reply = await ask_ai(
-            "তুমি একটা মজার, শালীন বাংলা জোক বলো। ছোট রাখবে।", "একটা জোক বলো",
-            user_id=update.effective_user.id,
-        )
-        await update.message.reply_text(reply)
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.95, cache_hit=True, note="Response Cache", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "joke", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="joke"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
+        # Phase 47: জোক প্রতিবার তাজা — তাই use_cache=False (ক্যাশে জমা হয় না)।
+        reply = await ask_ai(system_prompt, text, use_cache=False, user_id=user_id)
+        metadata = make_source_metadata("groq", confidence=0.95, query=text)
     except Exception:
-        await update.message.reply_text("দুঃখিত, এখন জোক আনতে পারলাম না।")
+        reply = await localize(user_id, "দুঃখিত, এখন জোক আনতে পারলাম না।")
+    await send_long_text(update, attach_source_badge(reply, metadata, "joke", attribution_lang(user_id)))
 
 
 async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await quota_guard(update, action="quote"):
         return
+    user_id = update.effective_user.id
+    system_prompt = "তুমি একটা অনুপ্রেরণামূলক ছোট উক্তি বাংলায় লেখো।"
+    text = "একটা উক্তি দাও"
+    metadata = None
     try:
-        reply = await ask_ai(
-            "তুমি একটা অনুপ্রেরণামূলক ছোট উক্তি বাংলায় লেখো।", "একটা উক্তি দাও",
-            user_id=update.effective_user.id,
-        )
-        await update.message.reply_text(reply)
+        # Phase 47 priority: 💾 Database (cache) → 🌐 Browser → 🔵 Groq API।
+        cached = await ai_response_cache.get(system_prompt, text)
+        if cached is not None:
+            metadata = make_source_metadata(
+                "database", confidence=0.95, cache_hit=True, note="Response Cache", query=text,
+            )
+            await send_long_text(update, attach_source_badge(cached, metadata, "quote", attribution_lang(user_id)))
+            return
+
+        no_api_mode = is_no_api_mode(user_id)
+        if not no_api_mode:
+            browse_answer = await _automatic_browse_answer(
+                user_id, text, _browse_lang_hint(user_id, text), no_api_mode, command="quote"
+            )
+            if browse_answer:
+                await send_long_text(update, browse_answer)
+                return
+
+        # Phase 47: উক্তিও প্রতিবার তাজা — তাই use_cache=False।
+        reply = await ask_ai(system_prompt, text, use_cache=False, user_id=user_id)
+        metadata = make_source_metadata("groq", confidence=0.95, query=text)
     except Exception:
-        await update.message.reply_text("দুঃখিত, এখন উক্তি আনতে পারলাম না।")
+        reply = await localize(user_id, "দুঃখিত, এখন উক্তি আনতে পারলাম না।")
+    await send_long_text(update, attach_source_badge(reply, metadata, "quote", attribution_lang(user_id)))
 
 
 async def dice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10790,6 +11615,60 @@ CODE_KNOWLEDGE_BASE = [
      "    salt = bytes.fromhex(salt_hex)\n"
      "    check = hashlib.pbkdf2_hmac(\"sha256\", password.encode(), salt, 100_000)\n"
      "    return check.hex() == digest_hex\n"),
+    # ---- সুপরিচিত, সসীম অ্যালগরিদম প্যাটার্ন — এই ক্লাসিক একক-ধাপের টাস্কগুলোর জন্য
+    #      AI কল করা অবান্তর; নির্দিষ্ট, যাচাইযোগ্য টেমপ্লেট নিচে দেওয়া ----
+    (("fizzbuzz", "fizz buzz", "ফিজবাজ", "ফিজ বাজ"), "fizzbuzz",
+     "def fizzbuzz(n: int) -> None:\n"
+     "    for i in range(1, n + 1):\n"
+     "        if i % 3 == 0 and i % 5 == 0:\n"
+     "            print(\"FizzBuzz\")\n"
+     "        elif i % 3 == 0:\n"
+     "            print(\"Fizz\")\n"
+     "        elif i % 5 == 0:\n"
+     "            print(\"Buzz\")\n"
+     "        else:\n"
+     "            print(i)\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    fizzbuzz(20)\n"),
+    (("prime number", "prime check", "is prime", "প্রাইম", "মৌলিক সংখ্যা"), "prime_check",
+     "def is_prime(n: int) -> bool:\n"
+     "    \"\"\"Trial division — O(√n)।\"\"\"\n"
+     "    if n < 2:\n"
+     "        return False\n"
+     "    if n % 2 == 0:\n"
+     "        return n == 2\n"
+     "    d = 3\n"
+     "    while d * d <= n:\n"
+     "        if n % d == 0:\n"
+     "            return False\n"
+     "        d += 2\n"
+     "    return True\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print([n for n in range(2, 50) if is_prime(n)])\n"),
+    (("factorial", "ফ্যাক্টোরিয়াল"), "factorial",
+     "def factorial(n: int) -> int:\n"
+     "    if n < 0:\n"
+     "        raise ValueError(\"ঋণাত্মক সংখ্যার factorial নেই\")\n"
+     "    result = 1\n"
+     "    for i in range(2, n + 1):\n"
+     "        result *= i\n"
+     "    return result\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(factorial(5))  # 120\n"),
+    (("fibonacci", "ফিবোনাচি", "ফিবোনাচ্চি"), "fibonacci",
+     "def fib_sequence(n: int) -> list:\n"
+     "    a, b, out = 0, 1, []\n"
+     "    for _ in range(n):\n"
+     "        out.append(a)\n"
+     "        a, b = b, a + b\n"
+     "    return out\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(fib_sequence(10))\n"),
+    (("string reverse", "reverse a string", "reverse string", "স্ট্রিং রিভার্স", "স্ট্রিং উল্টো"), "string_reverse",
+     "def reverse_string(text: str) -> str:\n"
+     "    return text[::-1]\n\n\n"
+     "if __name__ == \"__main__\":\n"
+     "    print(reverse_string(\"আমার সোনার বাংলা\"))\n"),
 ]
 
 # --------------------------------------------------------------------------
@@ -10852,6 +11731,403 @@ def match_knowledge_base(title: str, description: str, project_name: str = "", p
     return label, code
 
 
+# --------------------------------------------------------------------------
+# Dynamic KB entry: `dynamic_print_task`
+# এটা CODE_KNOWLEDGE_BASE-এর মতো স্থির-কীওয়ার্ড টেবিল নয় — একটা ডাইনামিক এন্ট্রি।
+# টাস্কের মূল কাজ যদি "প্রোগ্রাম রান করলে একটা নির্দিষ্ট বার্তা প্রিন্ট হবে" ধরনের
+# deterministic কাজ হয়, তাহলে title+description থেকে regex দিয়ে বার্তাটা বের করে,
+# project['stack']-এ লেখা ভাষার সঠিক সিনট্যাক্সে সম্পূর্ণ চালানোর-যোগ্য কোড বানিয়ে
+# দেয় — AI কল ছাড়াই। বার্তা-বের করার অগ্রাধিকার:
+#   ১) কোটেশনের ভেতরের টেক্সট (শুধু প্রিন্ট/রান-প্রসঙ্গ থাকলেই গ্রহণ — নইলে
+#      "ডিজাইনে 'login' পেজ" এধরনের বিচ্ছিন্ন কোটেড শব্দ ভুলে ধরা পড়ত);
+#   ২) না পেলে বাংলা "করলে/চালালে ... লেখা আসবে/দেখাবে/প্রিন্ট হবে" প্যাটার্নের মাঝের অংশ;
+#   ৩) তারপর ইংরেজি "prints/outputs/shows ... when/if run" প্যাটার্নের মাঝের অংশ।
+# কোনোটিতেই কিছু না মিললে (বা স্ট্যাকের ভাষা চেনা না হলে) None — স্বাভাবিক AI ফ্লো
+# চালু থাকে, জোর করে ভুল কিছু বসানো হয় না।
+# --------------------------------------------------------------------------
+
+DYNAMIC_PRINT_KB_LABEL = "dynamic_print"          # task.source → knowledge_base:dynamic_print
+DYNAMIC_PRINT_MSG_MAX_CHARS = 160                 # এর চেয়ে লম্বা বার্তা সহজ print টাস্কের নয় → অমিল ধরা হয়
+# রিকোয়েস্টে ভাষার নাম উল্লেখ না থাকলে dynamic-print কোড এই ডিফল্ট ভাষায় জেনারেট হয়
+# (বটের বাকি deterministic coding টেমপ্লেট/টুলিংয়ের ডিফল্ট ভাষাও python)।
+DEFAULT_DYNAMIC_PRINT_LANGUAGE = "python"
+
+# রিকোয়েস্টে স্পষ্টভাবে এমন ভাষার নাম থাকলে যেটা dynamic KB জানে না, জোর করে ডিফল্ট
+# python বসানো যাবে না — ভুল সিনট্যাক্সে টাস্ক 'done' হয়ে যাওয়ার ঝুঁকি থাকে। তখন
+# None (blocked/AI ফলব্যাক) — "জোর করে ভুল সিনট্যাক্স বসানো হয় না" নীতিই বজায় থাকে।
+_DYNAMIC_PRINT_UNSUPPORTED_LANG_RE = re.compile(
+    r"\brust\b|\bswift\b|\blua\b|\bperl\b|\bscala\b|\bdart\b|\bhaskell\b|\bclojure\b"
+    r"|\belixir\b|\bjulia\b|\br\b|\bmatlab\b|\bfortran\b|\bcobol\b|\bpascal\b"
+    r"|\bvb(?:\.net)?\b|\bobjective-?c\b|\bf#\b",
+    re.IGNORECASE,
+)
+
+# কোটেশন-শাখাটা চালু হবে কিনা — টেক্সটে কোথাও print/run-জাতীয় ইঙ্গিত থাকতে হবে।
+_DYNAMIC_PRINT_CONTEXT_RE = re.compile(
+    r"প্রিন্ট|print|লেখা\s+আসবে|লেখা\s+দেখ|দেখানো\s+হবে|দেখাবে|আউটপুট|আউটপুট|স্ক্রিনে|কনসোলে|স্টডাউট|"
+    r"\bprint(?:s|ed|ing)?\b|\boutput(?:s)?\b|\bdisplay(?:s|ed|ing)?\b|\bshow(?:s|ed|ing)?\b|\becho(?:es|ed)?\b|"
+    r"\brun\b|\bruns\b|\brunning\b|\bexecut(?:e|es|ed|ing|ion)\b|when\s+(?:it\s+|the\s+\w+\s+)?run(?:s)?\b|"
+    r"\bif\s+run\b|রান\s*করলে|রান\s*করলে|রান\s*করলে|চালালে|চালালে|চালালে|ইনপুট\s+দিলে|"
+    r"console\.log|system\.out|\bprintf\b",
+    re.IGNORECASE,
+)
+
+# কোটেশন জোড়া (সোজা + বাঁকা + ফরাসি)। খোলা কোটের ঠিক আগে এবং বন্ধ কোটের ঠিক পরে
+# ফাংশন-কল/অ্যারে-স্টাইল প্রতীক থাকলে সেটি বাতিল — `print("hi")`-এর মতো কোড-স্নিপেট
+# থেকে ভুলভাবে "hi" তুলে নেওয়া যাবে না। single-quote জোড়ায় আবার শব্দের সাথে লেগে থাকা
+# অ্যাপোস্ট্রফি ("user's script's") এড়াতে দুই পাশেই word-boundary না-লাগার শর্ত।
+_DYNAMIC_PRINT_QUOTED_RES = (
+    re.compile(r"(?<![(=\[{])\"([^\"\n]{1,200})\"(?![)\]}])"),
+    re.compile(r"[\u201c]([^\"\u201d\u201c\n]{1,200})[\u201d]"),
+    re.compile(r"(?<![\w(=\[{])'([^'\n]{1,200})'(?![\w)\]}])"),
+    re.compile(r"(?<![\w])[\u2018]([^'\u2018\u2019\n]{1,200})[\u2019](?![\w])"),
+    re.compile(r"\u00ab([^\u00bb\n]{1,200})\u00bb"),
+)
+
+# বাংলা: "... করলে/চালালে <বার্তা> লেখা আসবে/লেখা দেখাবে/প্রিন্ট হবে/দেখানো হবে"
+_DYNAMIC_PRINT_BN_RE = re.compile(
+    r"(?:চালালে|চালালে|রান\s*করলে|রান\s*করলে|করলে|করলে)\s+"
+    r"[\"'`\u201c\u2018]?\s*([^\"'`\n]{1,200}?)\s*[\"'`\u201d\u2019]?\s+"
+    r"(?:লেখা\s+আসবে|লেখা\s+দেখাবে|লেখা\s+দেখাবে|লেখা\s+উঠবে|লেখা\s+প্রিন্ট\s+হবে|প্রিন্ট\s+হবে|প্রিন্ট\s+করা\s+হবে|দেখানো\s+হবে)"
+)
+
+# ইংরেজি: "... prints/outputs/shows <বার্তা> when/if (it is) run/executed"
+# capture-এ কোট চরিত্র থাকবে না — `print("hi")`-এর মতো কোড-কল থেকে গ্রাস করবে না;
+# কোটেশনযুক্ত বার্তা আগেই quoted-শাখা ধরে ফেলে।
+_DYNAMIC_PRINT_EN_RE = re.compile(
+    r"\b(?:prints?|outputs?|displays?|shows?|echo(?:es|s)?)\b\s*[:\-]?\s*"
+    r"(?:the\s+|this\s+)?(?:text|string|message|sentence|line|word)?\s*"
+    r"[:\-]?\s*[\"'`\u201c\u2018]?\s*([^\"'`\n]{1,200}?)\s*[\"'`\u201d\u2019]?\s+"
+    r"\b(?:when|if)\b\s+(?:it\s+|the\s+\w+\s+|they\s+)?(?:is\s+|are\s+|gets?\s+)?(?:run|ran|executed|invoked|launched)\b",
+    re.IGNORECASE,
+)
+
+# কোটের ভেতরে ফাইল/পাথের মতো দেখতে লেখা প্রিন্ট-বার্তা না — উপেক্ষা।
+_DYNAMIC_PRINT_PATHISH_RE = re.compile(
+    r"^[\w./\\ -]{1,80}\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|java|kt|c|h|cpp|hpp|go|rs|rb|php|pl|swift|sh|bash|zsh|"
+    r"txt|md|json|ya?ml|toml|ini|cfg|html?|css|scss|sql|db|sqlite3?|csv|log|png|jpe?g|svg|ico|pdf|zip)$",
+    re.IGNORECASE,
+)
+
+# ---- Negative-context গেট: UI/ফিচার-বর্ণনা ≠ লিটারেল প্রিন্ট-নির্দেশ --------------
+# 'The onboarding wizard shows a "Welcome" screen first' — এধরনের বাক্যে "shows" +
+# কোটেশন থাকায় এক্সট্র্যাক্টর ভুলে "Welcome" কে প্রিন্ট-বার্তা ধরে print("Welcome")
+# জেনারেট করত, আর টাস্ক AI ছাড়াই 'done' মার্ক হয়ে ভুল কোডে আটকে যেত। অথচ বাক্যটা
+# UI-তে কিছু 'দেখানো'র বর্ণনা — কনসোলে লিটারেল প্রিন্টের নির্দেশ না।
+_DYNAMIC_PRINT_UI_WORDS_RE = re.compile(
+    r"\bscreens?\b|\bpages?\b|\bwizards?\b|\bdialogs?\b|\bmodal(?:s| dialogs)?\b|\btoasts?\b|\bui\b|\bforms?\b|"
+    r"স্ক্রিন|স্ক্রিন|পেজ|পৃষ্ঠা|ফর্ম|ফরম|উইজার্ড|ডায়ালগ|ডায়ালাগ|মোডাল|টোস্ট",
+    re.IGNORECASE,
+)
+# স্পষ্ট "কনসোল/আউটপুটে ছাপো" নির্দেশ — এটা থাকলে UI-শব্দ সত্ত্বেও বার্তা-বের করা বৈধ
+# (BN/EN মাঝের-অংশ প্যাটার্নের টার্মিনাল-ভার্বগুলোও এখানেই, তাই গেট সঠিক ম্যাচ কখনো
+#  অকেজো করে না)। "দেখাবে" একা এই তালিকায় নেই — সেটাই বাস্তবে UI-বর্ণনার প্রধান ক্রিয়া।
+_DYNAMIC_PRINT_LITERAL_PRINT_RE = re.compile(
+    r"\bprint(?:s|ed|ing)?\b|\bprintf\b|\bconsole\.log\b|\becho(?:es|ed)?\b|\bstdout\b|\bstderr\b|"
+    r"প্রিন্ট|প্রিন্ট|কনসোলে|স্টডাউট|লেখা\s+আসবে|লেখা\s+দেখ|লেখা\s+উঠবে|লেখা\s+প্রিন্ট|প্রিন্ট\s+হবে|প্রিন্ট\s+করা\s+হবে|দেখানো\s+হবে",
+    re.IGNORECASE,
+)
+
+
+def _dynamic_print_looks_like_ui_description(text: str) -> bool:
+    """টেক্সটটা কি UI/ফিচার-বর্ণনা, লিটারেল প্রিন্ট-টাস্ক না?
+
+    UI/ফিচার-বর্ণনাসূচক শব্দ (screen/page/wizard/dialog/modal/toast/form/UI +
+    বাংলা স্ক্রিন/পেজ/ফর্ম...) থাকলে এবং বাক্যে স্পষ্ট কনসোল-প্রিন্ট নির্দেশ
+    (print/echo/প্রিন্ট/লেখা আসবে/দেখানো হবে) না থাকলে → True। True হলে dynamic
+    এন্ট্রি পুরোপুরি প্রযোজ্য নয় — কোটেশন-শাখা আর ইংরেজি 'shows ... '-ধরনের
+    মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None (স্বাভাবিক AI ফ্লো)। বাংলা মাঝের-অংশ
+    প্যাটার্ন স্বয়ংক্রিয়ভাবে নিরাপদ, কারণ ওর টার্মিনাল-ভার্বগুলো লিটারেল তালিকায়ই আছে।
+    সন্দেহে AI-তে পাঠানো (একটু বেশি খরচ) ভুল কোড দিয়ে টাস্ক 'done' মার্ক করে
+    অদৃশ্য করে দেওয়ার চেয়ে ঢের নিরাপদ — তাই গেট conservative দিকেই ঝুঁকে।
+    """
+    if not text or not _DYNAMIC_PRINT_UI_WORDS_RE.search(text):
+        return False
+    return not _DYNAMIC_PRINT_LITERAL_PRINT_RE.search(text)
+
+
+# স্ট্যাক-স্ট্রিং → ভাষা। ক্রম গুরুত্বপূর্ণ: "javascript" "java"র আগে, "c++"/"c#" "c"র আগে,
+# আর "kotlin" "java"র আগে — Android স্ট্যাক সহ "Kotlin for Android" ভুলে 'java' ধরে
+# ফেলছিল (regression fix), তাই kotlin-চেক আগে এবং 'android' শব্দটা java-প্যাটার্ন থেকে
+# সরানো হয়েছে (অ্যান্ড্রয়েড-প্রজেক্ট এখন প্রায় সবটাই Kotlin-ভিত্তিক — 'android'
+# একা java-র নির্ভরযোগ্য সংকেত নয়; শুধু "Android" থাকলে কিছু না ধরে AI ফলব্যাকই নিরাপদ)।
+_DYNAMIC_PRINT_LANG_PATTERNS = (
+    (re.compile(r"javascript|typescript|\bjs\b|\bnode(?:\.js)?\b|nodejs|react|express|nestjs|\bdeno\b", re.IGNORECASE), "javascript"),
+    (re.compile(r"c\+\+|\bcpp\b|\bcxx\b", re.IGNORECASE), "cpp"),
+    (re.compile(r"c#|csharp|\.net\b|dotnet", re.IGNORECASE), "csharp"),
+    (re.compile(r"\bkotlin\b", re.IGNORECASE), "kotlin"),
+    (re.compile(r"\bjava\b|spring(?:boot)?", re.IGNORECASE), "java"),
+    (re.compile(r"\bpython\b|\bpy\b|django|flask|fastapi|streamlit", re.IGNORECASE), "python"),
+    (re.compile(r"\bphp\b|laravel|wordpress|\bmagento\b", re.IGNORECASE), "php"),
+    (re.compile(r"\bbash\b|\bshell\b|\bzsh\b|\bsh\b|shell\s*script", re.IGNORECASE), "bash"),
+    (re.compile(r"\bgo\b|golang", re.IGNORECASE), "go"),
+    (re.compile(r"\bruby\b|rails", re.IGNORECASE), "ruby"),
+    # একক "C" শেষে — বড় শব্দের অংশ হলে (\b না লাগলেও +,# থাকা অবস্থায়) বাদ।
+    (re.compile(r"(?<![\w+#])c(?![\w+#])", re.IGNORECASE), "c"),
+)
+
+
+def _detect_dynamic_print_language(stack: str) -> str:
+    """project['stack']-এর লেখা থেকে চেনা ভাষার কী-নাম; অচেনা হলে "" (তখন AI ফলব্যাক)।"""
+    s = (stack or "").strip()
+    if not s or "অজানা" in s or s.lower() in ("unknown", "none", "n/a"):
+        return ""
+    for pattern, language in _DYNAMIC_PRINT_LANG_PATTERNS:
+        try:
+            if pattern.search(s):
+                return language
+        except Exception:
+            continue
+    return ""
+
+
+def _clean_dynamic_print_message(raw: str) -> str:
+    """ক্যাপচার করা অংশ ছোট-লাইন, কোট-মুক্ত ও বৈধ-দৈর্ঘ্য না হলে খালি স্ট্রিং।"""
+    msg = "".join(ch for ch in (raw or "") if ord(ch) >= 32 or ch == " ")
+    msg = " ".join(msg.split())
+    msg = msg.strip().strip("\"'`\u201c\u201d\u2018\u2019\u00ab\u00bb")
+    msg = msg.lstrip(":>- \t").strip()
+    if len(msg) < 2 or len(msg) > DYNAMIC_PRINT_MSG_MAX_CHARS:
+        return ""
+    if not re.search(r"[\u0980-\u09ffA-Za-z0-9\u00c0-\u024fÀ-ſ]", msg):
+        return ""  # অন্তত এক অক্ষর/সংখ্যার শব্দ থাকতে হবে — "?!?" জাতীয় কিছু বার্তা নয়
+    if any(tok in msg for tok in ("()", "{", "}", ";", "<html", "</", "#include", "def ", "import ")):
+        return ""  # কোড-সদৃশ অংশ প্রিন্ট-বার্তা হতে পারে না
+    if _DYNAMIC_PRINT_PATHISH_RE.match(msg):
+        return ""  # "main.py", "index.js" — ফাইলনাম, বার্তা নয়
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", msg) and "_" in msg:
+        return ""  # user_id জাতীয় snake_case শনাক্তকারক, লিটারেল বার্তা নয়
+    return msg
+
+
+def extract_dynamic_print_message(title: str, description: str) -> Optional[str]:
+    """টাস্কের title+description থেকে প্রিন্ট করার বার্তা বের করে (dynamic KB অংশ ১)।
+
+    ক্রম: ১) কোটেশনের ভেতরের টেক্সট (প্রিন্ট/রান-প্রসঙ্গ থাকা অবস্থায়),
+    ২) বাংলা "করলে ... লেখা আসবে/দেখাবে/প্রিন্ট হবে" প্যাটার্নের মাঝের অংশ,
+    ৩) ইংরেজি "prints/outputs/shows ... when/if run" প্যাটার্নের মাঝের অংশ।
+    কোনোটিতেই মিলল না → None (কলার তখন স্বাভাবিক AI ফ্লোতে যায়)। এর আগেই
+    negative-context গেট: টেক্সট UI/ফিচার-বর্ণনাসূল্য (screen/page/wizard/dialog...
+    শব্দ আছে, অথচ লিটারেল print/প্রিন্ট-নির্দেশ নেই) হলে quote-শাখা ও ইংরেজি
+    'shows ...'-মাঝের-অংশ গ্রাস দুটোই স্কিপ করে None — '...shows a "Welcome"
+    screen first...' এধরনের বর্ণনাকে প্রিন্ট-টাস্ক বলে ভুল 'done' মার্ক হবে না।
+    """
+    text = f"{(title or '').strip()}\n{(description or '').strip()}".strip()
+    if not text:
+        return None
+    # ০) negative context — UI/ফিচার-বর্ণনা প্রিন্ট-টাস্ক নয় (conservative: AI ফলব্যাক)
+    if _dynamic_print_looks_like_ui_description(text):
+        return None
+    # ১) কোটেশন — কেবল প্রিন্ট/রান-জাতীয় প্রসঙ্গেই বিশ্বস্ত
+    if _DYNAMIC_PRINT_CONTEXT_RE.search(text):
+        for quote_re in _DYNAMIC_PRINT_QUOTED_RES:
+            for m in quote_re.finditer(text):
+                candidate = _clean_dynamic_print_message(m.group(1))
+                if candidate:
+                    return candidate
+    # ২) বাংলা মাঝের-অংশ প্যাটার্ন (প্যাটার্নটাই প্রসঙ্গ বহন করে, আলাদা গেট দরকার নেই)
+    m = _DYNAMIC_PRINT_BN_RE.search(text)
+    if m:
+        candidate = _clean_dynamic_print_message(m.group(1))
+        if candidate:
+            return candidate
+    # ৩) ইংরেজি মাঝের-অংশ প্যাটার্ন
+    m = _DYNAMIC_PRINT_EN_RE.search(text)
+    if m:
+        candidate = _clean_dynamic_print_message(m.group(1))
+        if candidate:
+            return candidate
+    return None
+
+
+def _dynamic_print_dq_literal(message: str) -> str:
+    """C-পরিবার সিনট্যাক্সের (Python/JS/Java/C/C++/Go/C#/Kotlin) ডাবল-কোটেড স্ট্রিং লিটারেল।
+
+    JSON এস্কেপ এ-সব ভাষার লিটারেল-এস্কেপের উপসেট; JSON-এর অতিরিক্ত `\\/` এস্কেপ
+    কিছু ভাষায় (C/Go) অবৈধ, তাই বাদ। বাকি নিয়ন্ত্রণ-অক্ষর extract/clean ধাপেই মুছে
+    যায়, আর বেহাল্লাসহ বাকি non-ASCII কাঁচা UTF-8-এ রাখা হয় (সব ভাষাই UTF-8 সোর্স
+    চালায়)।
+    """
+    return json.dumps(message, ensure_ascii=False).replace("\\/", "/")
+
+
+def _dynamic_print_sq_literal(message: str, shell: bool = False) -> str:
+    """সিঙ্গেল-কোটেড লিটারেল (PHP/Ruby) — shell=True হলে bash-এর `'\''` কৌশল।"""
+    if shell:
+        return "'" + message.replace("'", "'\\''") + "'"
+    return "'" + message.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _build_dynamic_print_code(language: str, message: str) -> str:
+    """`message`-টাকে `language`-এর সঠিক সিনট্যাক্সে বসিয়ে সম্পূর্ণ চালানোর-যোগ্য কোড।
+
+    তালিকায় থাকা প্রতিটা ভাষার জন্য একটা করে ছোট, স্ব-নির্ভর (কোনো dependency
+    ছাড়াই চালানো যায়) entry-point ফাইল তৈরি হয়; তালিকায় না থাকা ভাষা → ""।
+    """
+    dq = _dynamic_print_dq_literal(message)
+    if language == "python":
+        return f"print({dq})\n"
+    if language == "javascript":
+        return f"console.log({dq});\n"
+    if language == "java":
+        return (
+            "public class Main {\n"
+            "    public static void main(String[] args) {\n"
+            f"        System.out.println({dq});\n"
+            "    }\n"
+            "}\n"
+        )
+    if language == "c":
+        return (
+            "#include <stdio.h>\n"
+            "\n"
+            "int main(void) {\n"
+            f"    printf(\"%s\\n\", {dq});\n"
+            "    return 0;\n"
+            "}\n"
+        )
+    if language == "cpp":
+        return (
+            "#include <iostream>\n"
+            "\n"
+            "int main() {\n"
+            f"    std::cout << {dq} << std::endl;\n"
+            "    return 0;\n"
+            "}\n"
+        )
+    if language == "php":
+        return f"<?php\n\necho {_dynamic_print_sq_literal(message)} . \"\\n\";\n"
+    if language == "bash":
+        return f"#!/usr/bin/env bash\n\nprintf '%s\\n' {_dynamic_print_sq_literal(message, shell=True)}\n"
+    if language == "go":
+        return (
+            "package main\n"
+            "\n"
+            "import \"fmt\"\n"
+            "\n"
+            "func main() {\n"
+            f"    fmt.Println({dq})\n"
+            "}\n"
+        )
+    if language == "csharp":
+        return (
+            "using System;\n"
+            "\n"
+            "class Program {\n"
+            "    static void Main() {\n"
+            f"        Console.WriteLine({dq});\n"
+            "    }\n"
+            "}\n"
+        )
+    if language == "ruby":
+        return f"puts {_dynamic_print_sq_literal(message)}\n"
+    if language == "kotlin":
+        # Kotlin-এ ডাবল-কোটেড স্ট্রিংয়ে $ টেমপ্লেট-ইন্টারপোলেশন শুরু করে — এস্কেপ বাধ্যতামূলক।
+        literal = dq.replace("$", "\\$")
+        return f"fun main() {{\n    println({literal})\n}}\n"
+    return ""
+
+
+def match_dynamic_print_task(title: str, description: str, stack: str = "") -> Optional[Tuple[str, str]]:
+    """`dynamic_print_task` ডাইনামিক KB এন্ট্রি — match_knowledge_base()-এর মতোই
+    (label, code) টাপল রিটার্ন করে (label = "dynamic_print"), যাতে process_next_code_task
+    একই ফর্ম্যাটে সরাসরি সেভ করতে পারে।
+
+    বার্তা না মিললে, বা project['stack']-এর ভাষা চেনা না হলে None রিটার্ন — কলার তখন
+    স্বাভাবিক AI ফ্লোতে ফলব্যাক করে (জোর করে ভুল সিনট্যাক্স বসানো হয় না)।
+    """
+    message = extract_dynamic_print_message(title, description)
+    if not message:
+        return None
+    language = _detect_dynamic_print_language(stack)
+    if not language:
+        return None
+    code = _build_dynamic_print_code(language, message)
+    if not code:
+        return None
+    return DYNAMIC_PRINT_KB_LABEL, code
+
+
+def _match_dynamic_print_request(text: str) -> Optional[Tuple[str, str, str]]:
+    """রিকোয়েস্ট-টেক্সট থেকে deterministic dynamic-print ম্যাচ — (label, code, language)।
+
+    No API Mode-এ /codeproject প্ল্যানার (coding_analyze_and_plan) এটাই ব্যবহার করে —
+    dynamic_print_task ম্যাচার (match_dynamic_print_task) এর উপর ভর করে। ভাষা আগে
+    রিকোয়েস্ট থেকেই ধরা হয় ("python এ কোড লেখ..." জাতীয় উল্লেখ); উল্লেখ না থাকলে
+    ডিফল্ট ভাষা ধরে নেওয়া হয়। কিছু না মিললে None — কলার স্বাভাবিক ফ্লো/ফলব্যাকে
+    যায়, কখনো raise হয় না।
+    """
+    try:
+        # স্পষ্টভাবে unsupported ভাষার নাম থাকলে ডিফল্ট python জোর করা হয় না।
+        if _DYNAMIC_PRINT_UNSUPPORTED_LANG_RE.search(text or ""):
+            return None
+        language = _detect_dynamic_print_language(text) or DEFAULT_DYNAMIC_PRINT_LANGUAGE
+        match = match_dynamic_print_task("", text, language)
+        if not match:
+            return None
+        label, code = match
+        return label, code, language
+    except Exception as e:
+        logger.debug("deterministic dynamic-print request match failed: %s", e)
+        return None
+
+
+def match_bangla_rule_task(title: str, description: str, stack: str = "") -> Optional[Tuple[str, str]]:
+    """`bangla_rule_engine` ডাইনামিক KB এন্ট্রি — match_dynamic_print_task()-এর ঠিক পাশে,
+    একই প্যাটার্নে: (label, code) টাপল রিটার্ন করে (label = "bangla_rule_engine"),
+    না মিললে None — কলার তখন স্বাভাবিক ফ্লোতে (dynamic-print matcher → Decision
+    Engine → AI) ফলব্যাক করে।
+
+    ইঞ্জিনটি bangla_rule_engine.py-তে: কড়া, নির্দিষ্ট ফরম্যাটের বাংলা নির্দেশনা
+    (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা) AI ছাড়াই চালানোর-যোগ্য
+    Python কোডে অনুবাদ করে। ইঞ্জিনের ভেতরের গার্ড dynamic-print-আকৃতির
+    ("রান করলে X লেখা আসবে") বা কোটেশন-যুক্ত টেক্সট আগেই বাদ দেয়, তাই এই
+    ম্যাচার dynamic_print-এর পরিপূরক — তার কাজ কেড়ে নেয় না।
+
+    v1 ইঞ্জিন শুধু Python জেনারেট করে: স্ট্যাক বা টেক্সটে স্পষ্ট অন্য ভাষা
+    (Java/JS/PHP... বা বাংলায় লেখা জাভা/জাভাস্ক্রিপ্ট...) থাকলে None —
+    "জোর করে ভুল সিনট্যাক্স বসানো হয় না" নীতি অক্ষত।
+    """
+    if _bangla_rule_translate is None:
+        return None
+    text = f"{(title or '').strip()}\n{(description or '').strip()}".strip()
+    if not text:
+        return None
+    # ভাষা-গার্ড: stack বা রিকোয়েস্ট-টেক্সটে চেনা অন্য ভাষার নাম থাকলে বাদ
+    for source in (stack or "", text):
+        if not source:
+            continue
+        if _DYNAMIC_PRINT_UNSUPPORTED_LANG_RE.search(source):
+            return None
+        language = _detect_dynamic_print_language(source)
+        if language and language != "python":
+            return None
+    try:
+        return _bangla_rule_translate(text)
+    except Exception as e:
+        logger.debug("bangla_rule_engine match failed: %s", e)
+        return None
+
+
+def _match_bangla_rule_request(text: str) -> Optional[Tuple[str, str, str]]:
+    """রিকোয়েস্ট-টেক্সট থেকে deterministic বাংলা rule-engine ম্যাচ — (label, code, language)।
+
+    _match_dynamic_print_request()-এর মতোই No API Mode-এ /codeproject প্ল্যানার
+    (coding_analyze_and_plan) এটা ব্যবহার করে। v1 ইঞ্জিন শুধু Python জেনারেট করে,
+    তাই language সবসময় "python"; টেক্সটে স্পষ্ট অন্য ভাষার নাম থাকলে None (AI
+    ফলব্যাক)। কিছু না মিললে None — কখনো raise হয় না।
+    """
+    try:
+        match = match_bangla_rule_task("", text, DEFAULT_DYNAMIC_PRINT_LANGUAGE)
+        if not match:
+            return None
+        label, code = match
+        return label, code, "python"
+    except Exception as e:
+        logger.debug("deterministic bangla-rule request match failed: %s", e)
+        return None
+
+
 def _strip_code_fences(text: str) -> str:
     """AI-এর উত্তরে ```code``` মার্কডাউন ফেন্স থাকলে সেটা সরিয়ে শুধু আসল কোডটুকু রাখে।"""
     text = (text or "").strip()
@@ -10880,13 +12156,100 @@ def _extract_json_object(text: str):
         return None
 
 
-async def coding_analyze_and_plan(raw_request: str) -> dict:
+async def coding_analyze_and_plan(raw_request: str, user_id: int) -> dict:
     """
     Prompt Analyze + Project Plan: ইউজারের কোডিং রিকোয়েস্ট একবারেই AI-কে পাঠিয়ে (নাম,
     স্ট্যাক/ভাষা, এবং ধারাবাহিক ছোট ছোট ধাপের তালিকা) JSON আকারে ফেরত চাওয়া হয়। JSON পার্স করা
     না গেলেও ফিচারটা যেন কখনো ভেঙে না পড়ে, তাই পুরো রিকোয়েস্টটাকেই তখন একটামাত্র ধাপ ধরে
     ফলব্যাক করা হয়।
+
+    No API Call Mode গার্ড: AI কলের আগেই deterministic ম্যাচ চেষ্টা হয় — প্রথমে
+    বাংলা রুল ইঞ্জিন (bangla_rule_engine: কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা),
+    তারপর dynamic-print ("রান করলে <বার্তা> লেখা আসবে") — দুটোই AI ছাড়াই একটাই
+    সঠিক ধাপে resolve হয় (ask_ai কোনোভাবেই ডাকা হয় না)। কিছু না মিললে /codeplan-এর
+    মতোই single-task fallback প্ল্যান (no_api_blocked চিহ্নসহ) ফেরত যায়, আর
+    codeproject_command সেটা ইউজারকে জানিয়ে দেয়।
     """
+    # No API Mode চালু থাকলে ask_ai কল করার আগেই আটকানো হয় — বাংলা রুল ইঞ্জিন বা
+    # dynamic-print ম্যাচে পড়লে deterministic এক-ধাপের প্ল্যান, নইলে blocked fallback
+    # (সবগুলো পথেই AI কল নেই)।
+    if is_no_api_mode(user_id):
+        # ১. Deterministic বাংলা রুল ইঞ্জিন (bangla_rule_engine) ম্যাচ চেষ্টা —
+        # কড়া ফরম্যাটের স্ট্রাকচার্ড নির্দেশনা (স্টোরেজ/ইনপুট/শর্ত/আউটপুট) আগে
+        # দেখা হয়; ইঞ্জিন-গার্ড dynamic-print-আকৃতির টেক্সট বাদ দিয়ে দেয়, তাই
+        # না মিললে পরের ধাপে dynamic-print নিজের মতোই কাজ করে।
+        try:
+            rule_match = _match_bangla_rule_request(raw_request)
+            if rule_match:
+                return {
+                    "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                    "stack": "python",
+                    "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                    "deterministic": True,
+                }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan bangla_rule_engine check failed: %s", e)
+
+        # ২. Deterministic dynamic-print ম্যাচ চেষ্টা
+        try:
+            dynamic = _match_dynamic_print_request(raw_request)
+            if dynamic:
+                _label, _code, language = dynamic
+                return {
+                    "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                    "stack": language,
+                    "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                    "deterministic": True,
+                }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan dynamic_print check failed: %s", e)
+
+        # ৩. Fixed Knowledge Base (CODE_KNOWLEDGE_BASE) ম্যাচ চেষ্টা
+        try:
+            kb_match = match_knowledge_base(
+                raw_request, "", project_name=raw_request[:40].strip() or "নতুন প্রজেক্ট", project_desc=raw_request
+            )
+            if kb_match:
+                return {
+                    "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                    "stack": "python",
+                    "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                    "deterministic": True,
+                }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan KB match check failed: %s", e)
+
+        # ৪. Brain OS Decision Engine ম্যাচ চেষ্টা
+        try:
+            decision = await decision_engine_service.execute_async(
+                raw_request,
+                user_id=user_id,
+                session_key=str(user_id),
+                exclude_categories=list(CODING_EXCLUDED_BRAIN_CATEGORIES),
+            )
+            if decision and decision.get("strategy") == "direct":
+                direct_code = _brain_payload_to_answer(decision.get("payload"))
+                if direct_code:
+                    direct_code = _strip_code_fences(direct_code)
+                    if _coding_result_looks_like_code(direct_code, "python"):
+                        return {
+                            "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+                            "stack": "python",
+                            "tasks": [{"title": "সম্পূর্ণ কাজ", "description": raw_request}],
+                            "deterministic": True,
+                        }
+        except Exception as e:
+            logger.debug("coding_analyze_and_plan Decision Engine check failed: %s", e)
+
+        # ৫. কোনোটিতেই না মিললে blocked fallback
+        stuck_msg = build_no_api_stuck_message({"stage": "coding_plan_ai", "confidence": 0.0})
+        return {
+            "project_name": raw_request[:40].strip() or "নতুন প্রজেক্ট",
+            "stack": "unknown",
+            "tasks": [{"title": "No API Mode চালু আছে", "description": stuck_msg}],
+            "fallback": True,
+            "no_api_blocked": True,
+        }
     system_prompt = (
         "তুমি একজন সিনিয়র সফটওয়্যার আর্কিটেক্ট। ইউজারের কোডিং রিকোয়েস্ট বিশ্লেষণ করে "
         f"সর্বোচ্চ {CODE_TASK_MAX_TASKS}টা ছোট, ধারাবাহিক (implementation order অনুযায়ী) ধাপে ভাগ করো। "
@@ -11037,6 +12400,19 @@ def get_next_pending_task(project_id: int):
     except Exception as e:
         logger.warning("Phase 20 get_next_pending_task failed: %s", e)
     return None
+
+
+def _is_first_task(project: dict) -> bool:
+    """এই প্রজেক্টে এখনো কোনো ধাপ 'done' হয়নি কিনা — অর্থাৎ এখন প্রসেস হওয়া ধাপটাই
+    প্রজেক্টের প্রথম ধাপ। process_next_code_task()-এর project-level dynamic-print
+    fallback শুধু তখনই বৈধ, যাতে multistep প্রজেক্টের পরের ধাপগুলোতে একই প্রিন্ট-কোড
+    বারবার stamp না হয়। DB-এরর হলে নিরাপদ দিক (False) — ফলব্যাক বন্ধ থাকে।"""
+    try:
+        tasks = get_project_tasks(project["id"])
+        return not any(t.get("status") == "done" for t in tasks)
+    except Exception as e:
+        logger.debug("_is_first_task check failed (treated as not-first): %s", e)
+        return False
 
 
 def save_task_result(task_id: int, code: str, source: str, status: str = "done"):
@@ -12248,6 +13624,118 @@ def _looks_like_programming_stack(stack: str) -> bool:
         return True
 
 
+# greeting/bot-info FAQ-র ফিঙ্গারপ্রিন্ট — কোড-স্যানিটি চেক আর "প্রাসঙ্গিক নিয়ম"
+# সংগ্রহ দুটোতেই ব্যবহৃত হয় (একই লিস্ট দুই জায়গায় কপি না করার জন্য মডিউল-লেভেল)।
+_FAQ_REPLY_NEEDLES = (
+    "সব কমান্ডের তালিকা",
+    "/help অথবা /menu",
+    "/menu অথবা /help",
+    "আপনাকেও ধন্যবাদ",
+    "you're welcome",
+    "how can i help you",
+    "আমি আপনাকে কীভাবে সাহায্য",
+    "type your question or use /menu",
+    "লিখুন অথবা /menu",
+    "আসসালামু আলাইকুম / হ্যালো",
+)
+
+# Decision Engine-এর ম্যাচ "কোড" না হয়ে "নিয়ম/গাইডলাইন টেক্সট" হলে সেগুলো ফেলে না
+# দিয়ে AI প্রম্পটে যোগ হয় — কয়টা এন্ট্রি ও প্রতিটা কত লম্বা থাকবে সেটা এখানে সীমাবদ্ধ,
+# যাতে প্রম্পট অতিরিক্ত বড় না হয়ে যায়।
+CODING_RELEVANT_RULES_MAX = 3
+CODING_RULE_TEXT_MAX_CHARS = 400
+
+# "নিয়ম" হতে পারে এমন টেক্সটের উল্টো-চেক: এই মার্কারগুলো বাক্যের শুরুতে থাকলে
+# এন্ট্রিটা আসলে কোড-স্নিপেট (প্রম্পটে নিয়ম হিসেবে ঢোকানোর দরকার নেই — direct
+# রুটে সেটা কোড হিসেবেই ব্যবহারের চেষ্টা হয়)।
+_RULE_CODE_LINE_START_RE = re.compile(
+    r"^(def |class |async def |import |from \w[\w.]* import|const |let |var |package |using |func |"
+    r"public |private |protected |int main|#include|#\!|<\?php|@\w+\.\w+|#!\s*/)",
+)
+
+
+def _rule_text_looks_like_code(text: str) -> bool:
+    """রুল-প্রার্থী টেক্সট আসলে কোড-ব্লক কিনা (নিয়ম সংগ্রহের ফিল্টার)।
+
+    _coding_result_looks_like_code()-এর মার্কার-হিউরিস্টিক প্রোজার প্রতি বারবার ফেল
+    করত (বিরাম-চিহ্ন/বন্ধনী থাকলেই "কোড" বলে ফেলে দিত), তাই এখানে আলাদা কড়া চেক —
+    বহু-লাইন কোড-শুরুর-শব্দ বা ফেন্সড ব্লক দেখলেই শুধু "কোড" ধরা হয়।
+    """
+    try:
+        t = (text or "").strip()
+        if not t:
+            return False
+        if "```" in t:
+            return True
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+        code_lines = sum(1 for ln in lines if _RULE_CODE_LINE_START_RE.match(ln))
+        if code_lines >= 2:
+            return True
+        if code_lines == 1 and len(lines) <= 2:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _collect_relevant_brain_rules(decision: Dict[str, Any], stack: str = "") -> List[str]:
+    """Decision Engine-এর সাজানো candidate list থেকে শীর্ষ কয়েকটা প্রাসঙ্গিক
+    (কোড-না-হওয়া) knowledge/pattern/template/documentation এন্ট্রি "নিয়ম/গাইডলাইন"
+    হিসেবে তুলে আনে।
+
+    গ্যাপ-ফিক্স: আগে direct ম্যাচ কোড-চেকে ফেল করলে এন্ট্রিটা সম্পূর্ণ বাতিল হয়ে
+    যেত, AI-প্রম্পটে পৌঁছাত না। ইউজারের /addknowledge, /addpattern, /addtemplate
+    দিয়ে দেওয়া কোডিং-স্ট্যান্ডার্ড প্রায়শই টেক্সট-রুল, কোড নয় — এগুলো এখন
+    confidence অনুযায়ী সাজানো শীর্ষ CODING_RELEVANT_RULES_MAXটা এন্ট্রি হিসেবে
+    (প্রতিটা CODING_RULE_TEXT_MAX_CHARS ক্যারেক্টারে truncation করে) AI-এর
+    system_prompt-এ পৌঁছায়। কোনো এররে খালি লিস্ট রিটার্ন — প্রম্পট তখন আগের
+    মতোই তৈরি হবে (কোনো নতুন সেকশন যোগ হবে না)।
+    """
+    rules: List[str] = []
+    try:
+        candidates = decision.get("candidates") or []
+        if not candidates:
+            # ক্যান্ডিডেট-বিহীন (পুরোনো/মক করা decision) decision-এ অন্তত best
+            # এন্ট্রিটাই বিবেচনা করা হয় — ফেল-হওয়া ম্যাচটাই যে "নিয়ম" তাই।
+            candidates = [{
+                "stage": decision.get("stage"),
+                "confidence": decision.get("confidence"),
+                "payload": decision.get("payload"),
+            }]
+        ranked = [
+            c for c in candidates
+            if isinstance(c, dict) and c.get("stage") in ("knowledge", "pattern", "template", "documentation")
+        ]
+        ranked.sort(key=lambda c: (
+            float(c.get("confidence") or 0.0),
+            float(c.get("score") or 0.0),
+        ), reverse=True)
+        seen = set()
+        for cand in ranked:
+            if len(rules) >= CODING_RELEVANT_RULES_MAX:
+                break
+            content = _brain_payload_to_answer(cand.get("payload"))
+            if not content:
+                continue
+            content = _strip_code_fences(content)
+            content = " ".join(content.split())  # মাল্টি-লাইন এন্ট্রিকে এক লাইনের বুলেটে
+            if len(content) < 8:
+                continue
+            if any(n in content or n in content.lower() for n in _FAQ_REPLY_NEEDLES):
+                continue  # greeting/bot-info FAQ কখনো কোডিং-নিয়ম নয়
+            if _rule_text_looks_like_code(content):
+                continue  # কোড-সদৃশ এন্ট্রি নিয়ম হিসেবে ঢোকাবে না
+            content = content[:CODING_RULE_TEXT_MAX_CHARS].rstrip()
+            key = content.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(content)
+    except Exception as e:
+        logger.debug("Relevant-rule collection skipped: %s", e)
+    return rules
+
+
 def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
     """Safety net: greeting/bot-info FAQ যেন coding task-এর `code` ফিল্ডে সেভ না হয়।
 
@@ -12261,19 +13749,7 @@ def _coding_result_looks_like_code(text: str, stack: str = "") -> bool:
             return False
         if not _looks_like_programming_stack(stack):
             return True
-        faq_needles = (
-            "সব কমান্ডের তালিকা",
-            "/help অথবা /menu",
-            "/menu অথবা /help",
-            "আপনাকেও ধন্যবাদ",
-            "you're welcome",
-            "how can i help you",
-            "আমি আপনাকে কীভাবে সাহায্য",
-            "type your question or use /menu",
-            "লিখুন অথবা /menu",
-            "আসসালামু আলাইকুম / হ্যালো",
-        )
-        if any(n in blob or n in blob.lower() for n in faq_needles):
+        if any(n in blob or n in blob.lower() for n in _FAQ_REPLY_NEEDLES):
             return False
         markers = (
             "def ", "async def", "import ", "from ", "class ",
@@ -12325,8 +13801,79 @@ async def process_next_code_task(project: dict):
         brain_os_metrics["direct_answers"] += 1
         return task
 
+    # বাংলা রুল ইঞ্জিন (bangla_rule_engine): কড়া, নির্দিষ্ট ফরম্যাটের বাংলা নির্দেশনা
+    # (ভেরিয়েবল/স্টোরেজ, ইনপুট, শর্ত, নিষেধ, আউটপুট, তুলনা) deterministicভাবে চালানোর-
+    # যোগ্য Python কোডে অনুবাদ করে — AI ছাড়াই। dynamic_print-এর আগে চেষ্টা হয়
+    # (matcher চেইনে নতুন এন্ট্রি), কিন্তু ইঞ্জিনের ভেতরের গার্ড dynamic-print-আকৃতির
+    # ("রান করলে X লেখা আসবে") বা কোটেশন-যুক্ত টেক্সট আগেই বাদ দেয় — তাই পুরনো
+    # print-matcher-এর আচরণ অক্ষত থাকে (পরিপূরক, প্রতিযোগী নয়)। এটাও
+    # is_no_api_mode() চেকের আগে বসা, তাই No API Mode-এও এই টাস্কগুলো সমাধান হয়।
+    # dynamic_print-এর মতোই প্রথম pending ধাপে (_is_first_task) project-এর
+    # name+description-এর বিরুদ্ধেও একবার ম্যাচ চেষ্টা হয় — generic ধাপে ভাঙা প্ল্যানে
+    # আসল রিকোয়েস্ট হারিয়ে না যায়; একই কোড দ্বিতীয় ধাপে stamp হয় না।
+    rule_engine_match = None
+    try:
+        rule_engine_match = match_bangla_rule_task(
+            task["title"], task["description"], project.get("stack", "")
+        )
+    except Exception as e:
+        logger.debug("bangla_rule_engine task check failed (AI fallback): %s", e)
+        rule_engine_match = None
+    if not rule_engine_match and _is_first_task(project):
+        try:
+            rule_engine_match = match_bangla_rule_task(
+                project.get("name", ""), project.get("description", ""), project.get("stack", "")
+            )
+        except Exception as e:
+            logger.debug("bangla_rule_engine project-level check failed (AI fallback): %s", e)
+            rule_engine_match = None
+    if rule_engine_match:
+        label, code = rule_engine_match
+        save_task_result(task["id"], code, source=f"knowledge_base:{label}")
+        task["code"], task["source"], task["status"] = code, f"knowledge_base:{label}", "done"
+        brain_os_metrics["direct_answers"] += 1
+        return task
+
+    # Dynamic KB entry `dynamic_print_task`: title+description থেকে regex দিয়ে প্রিন্ট
+    # বার্তা বের করে project['stack'] ভাষার সিনট্যাক্সে AI ছাড়াই সরাসরি কোড। কিছু
+    # না মিললে None — স্বাভাবিক ফ্লো চলবে। এটা is_no_api_mode() চেকের আগে বসা,
+    # তাই No API Mode চালু থাকলেও এই deterministic টাস্কগুলো ব্লক না হয়ে সমাধান হয়।
+    dynamic_match = None
+    try:
+        dynamic_match = match_dynamic_print_task(
+            task["title"], task["description"], project.get("stack", "")
+        )
+    except Exception as e:
+        logger.debug("dynamic_print_task check failed (AI fallback): %s", e)
+        dynamic_match = None
+    # Gap fix: প্ল্যান (AI-নির্মিত বা deterministic) একটা রিকোয়েস্টকে একাধিক generic
+    # ধাপে ভেঙে দিলে (যেমন "Initialize Project Folder", "Implement Success Message
+    # Function") কোনো ধাপের title/description-এই আসল "...রান করলে সফল হয়েছে লেখা
+    # আসবে" বাক্যটা থাকে না — অথচ project["description"]-এ আসল রিকোয়েস্ট অক্ষত থাকে।
+    # তাই প্রথম pending ধাপে (এখনো কোনো ধাপ done না হলে, _is_first_task) project-এর
+    # name+description-এর বিরুদ্ধেও একবার deterministic ম্যাচ চেষ্টা হয়। পরের
+    # ধাপগুলোতে আর চেষ্টা হয় না, তাই একই প্রিন্ট-কোড একাধিক ধাপে stamp হয় না।
+    # ম্যাচ ব্যর্থ হলে নিচের স্বাভাবিক ফ্লো (Decision Engine → AI/No API Mode গেট)
+    # অক্ষত থাকে — কখনো raise হয় না।
+    if not dynamic_match and _is_first_task(project):
+        try:
+            dynamic_match = match_dynamic_print_task(
+                project.get("name", ""), project.get("description", ""), project.get("stack", "")
+            )
+        except Exception as e:
+            logger.debug("dynamic_print_task project-level check failed (AI fallback): %s", e)
+            dynamic_match = None
+    if dynamic_match:
+        label, code = dynamic_match
+        save_task_result(task["id"], code, source=f"knowledge_base:{label}")
+        task["code"], task["source"], task["status"] = code, f"knowledge_base:{label}", "done"
+        brain_os_metrics["direct_answers"] += 1
+        return task
+
     # Phase 17: Decision Engine gets a chance before a coding AI call.
     # greeting/bot_info ক্যাটাগরি coding-context-এ কখনোই সঠিক উত্তর নয়।
+    relevant_rules: List[str] = []
+    decision = None
     decision_request = (
         f"Project: {project['name']}\nStack: {project['stack']}\n"
         f"Task: {task['title']}\nDescription: {task['description']}"
@@ -12340,26 +13887,35 @@ async def process_next_code_task(project: dict):
         )
         if decision.get("strategy") == "direct":
             direct_code = _brain_payload_to_answer(decision.get("payload"))
+            code_ok = False
             if direct_code:
                 direct_code = _strip_code_fences(direct_code)
-                code_ok = False
                 try:
                     code_ok = _coding_result_looks_like_code(direct_code, project.get("stack", ""))
                 except Exception as e:
                     logger.debug("Decision code-sanity check fallback to AI: %s", e)
                     code_ok = False
-                if code_ok:
-                    save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
-                    task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
-                    brain_os_metrics["direct_answers"] += 1
-                    return task
-                logger.info(
-                    "Decision Engine direct answer rejected by code-sanity (stage=%s)",
-                    decision.get("stage"),
-                )
+            if code_ok:
+                save_task_result(task["id"], direct_code, source=f"brain:{decision.get('stage', 'direct')}")
+                task["code"], task["source"], task["status"] = direct_code, f"brain:{decision.get('stage', 'direct')}", "done"
+                brain_os_metrics["direct_answers"] += 1
+                return task
+            logger.info(
+                "Decision Engine direct answer rejected by code-sanity (stage=%s)",
+                decision.get("stage"),
+            )
             brain_os_metrics["direct_failures"] += 1
     except Exception as e:
         logger.warning("Phase 17 coding Decision Engine fallback: %s", e)
+        decision = None
+    # Gap fix: Decision Engine থেকে knowledge/pattern/template ম্যাচ এসেও কোড-চেকে
+    # ফেল করলে (স্ট্র্যাটেজ direct) বা confidence কম বলে সরাসরি ai-তে পড়লে এন্ট্রিগুলো
+    # আগে সম্পূর্ণ বাতিল হয়ে যেত। ইউজারের /addknowledge, /addpattern, /addtemplate
+    # দেওয়া নিয়ম প্রায়শই কোড নয়, টেক্সট-গাইডলাইন — ফেলে না দিয়ে candidate list থেকে
+    # শীর্ষ কয়েকটা non-code এন্ট্রি তুলে নিই; নিচে AI-এর system_prompt-এ "অবশ্যই মেনে
+    # চলার নিয়ম" হিসেবে যাবে। (code_ok হলে উপরেই return — এখানে শুধু AI-routেই আসে।)
+    if decision is not None:
+        relevant_rules = _collect_relevant_brain_rules(decision, project.get("stack", ""))
 
     if is_no_api_mode(project.get("user_id", 0)):
         stuck_msg = build_no_api_stuck_message({"stage": "coding_ai_route", "confidence": 0.0})
@@ -12402,6 +13958,14 @@ async def process_next_code_task(project: dict):
         )
     else:
         system_prompt += "\nএটাই এই প্রজেক্টের প্রথম কোড — নতুন ফাইল লেখো।"
+    # Decision Engine-এর প্রাসঙ্গিক কিন্তু কোড-না-হওয়া এন্ট্রিগুলো (/addknowledge,
+    # /addpattern, /addtemplate-এ দেওয়া নিয়ম) নির্দেশনা হিসেবে AI-কে জানানো হয়।
+    if relevant_rules:
+        system_prompt += (
+            "\nএই ধাপের কোড লেখার সময় নিচের প্রাসঙ্গিক নিয়ম/গাইডলাইনগুলো অবশ্যই মেনে চলো:\n"
+            + "\n".join(f"- {rule}" for rule in relevant_rules)
+            + "\n"
+        )
     live_context = _brain_get_live_context(project.get("user_id", 0)) if project.get("user_id") else ""
     if live_context:
         context_note += "\nBrain OS context:\n" + live_context
@@ -13912,19 +15476,23 @@ async def contextpreview_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/codeproject <বিবরণ> — নতুন কোডিং প্রজেক্ট শুরু করে (Prompt Analyze + Project Plan)।"""
+    # Note: Use effective_message to handle edited message updates safely.
+    # Pattern should be audited repo-wide in a follow-up.
+    msg = update.message or update.effective_message
     if not context.args:
-        await update.message.reply_text(
-            "এভাবে লিখুন: /codeproject <আপনার কোডিং প্রজেক্টের বিবরণ>\n"
-            "উদাহরণ: /codeproject একটা Flask API বানাও যেখানে ইউজার রেজিস্ট্রেশন ও লগইন থাকবে"
-        )
+        if msg:
+            await msg.reply_text(
+                "এভাবে লিখুন: /codeproject <আপনার কোডিং প্রজেক্টের বিবরণ>\n"
+                "উদাহরণ: /codeproject একটা Flask API বানাও যেখানে ইউজার রেজিস্ট্রেশন ও লগইন থাকবে"
+            )
         return
     if not await quota_guard(update, action="coding_plan"):
         return
     user_id = update.effective_user.id
     raw_request = " ".join(context.args).strip()
-    thinking = await update.message.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...")
+    thinking = await msg.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...") if msg else None
     try:
-        plan = await coding_analyze_and_plan(raw_request)
+        plan = await coding_analyze_and_plan(raw_request, user_id)
         project_id = create_code_project(user_id, plan["project_name"], raw_request, plan["stack"], plan["tasks"])
         project = get_project(project_id, owner_id=user_id)
         try:
@@ -13935,19 +15503,33 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception as e:
             logger.debug("Phase 17 project context save skipped: %s", e)
-        await send_long_text(
-            update,
-            "✅ প্রজেক্ট প্ল্যান তৈরি হয়েছে (এটাই এখন আপনার সক্রিয় প্রজেক্ট)।\n\n"
-            + build_project_status_text(project)
-            + "\n\nপরের ধাপ প্রসেস করতে /codenext লিখুন।",
-        )
+        if plan.get("no_api_blocked"):
+            # No API Mode-এ AI প্ল্যান হয়নি — "AI দিয়ে প্ল্যান তৈরি হয়েছে" দাবি না করে
+            # /codeplan-এর মতোই blocked মেসেজ দেখানো হয়।
+            if msg:
+                await msg.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
+        else:
+            deterministic_note = (
+                "\n\n🤖 এই প্ল্যানটি AI কল ছাড়াই deterministicভাবে তৈরি হয়েছে।"
+                if plan.get("deterministic") else ""
+            )
+            await send_long_text(
+                update,
+                "✅ প্রজেক্ট প্ল্যান তৈরি হয়েছে (এটাই এখন আপনার সক্রিয় প্রজেক্ট)।\n\n"
+                + build_project_status_text(project)
+                + deterministic_note
+                + "\n\nপরের ধাপ প্রসেস করতে /codenext লিখুন।",
+            )
     except AIProviderError as e:
-        await update.message.reply_text(f"দুঃখিত, প্ল্যান বানাতে সমস্যা হয়েছে: {e}")
+        if msg:
+            await msg.reply_text(f"দুঃখিত, প্ল্যান বানাতে সমস্যা হয়েছে: {e}")
     except Exception as e:
         logger.error(f"Coding Orchestrator (/codeproject) এরর: {e}")
-        await update.message.reply_text("দুঃখিত, প্রজেক্ট প্ল্যান বানাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        if msg:
+            await msg.reply_text("দুঃখিত, প্রজেক্ট প্ল্যান বানাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
     finally:
-        await thinking.delete()
+        if thinking:
+            await thinking.delete()
 
 
 async def codenext_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16269,7 +17851,165 @@ def _oauth_pkce_ok(code_verifier: Optional[str], code_challenge: Optional[str], 
     return computed == code_challenge
 
 
-def _build_mcp_server():
+# =============================================================================
+# MCP টুল: simulate_message — Claude/MCP ক্লায়েন্ট থেকে বটের রিপ্লাই সিমুলেট করা।
+# টেলিগ্রাম বা প্রোডাকশন ইউজার/ডেটা স্পর্শ না করে, হালকা fake Update/Context দিয়ে
+# কমান্ড-হ্যান্ডলার ফাংশন সরাসরি চালিয়ে রিপ্লাই-টেক্সটগুলো ফেরত দেয়।
+# =============================================================================
+
+# command (slash ছাড়া, lowercase) -> হ্যান্ডলার ফাংশন। run_bot_async()-এ app.handlers
+# স্ক্যান করে অটো-ভরা হয় (নতুন কমান্ড যোগ হলেও ম্যাপ অটোমেটিক আপডেট হয়)।
+_COMMAND_HANDLERS: Dict[str, Callable] = {}
+
+
+def _collect_command_handlers(app=None) -> Dict[str, Callable]:
+    """app.handlers-এ রেজিস্টার করা প্রতিটা CommandHandler থেকে command→callback ম্যাপ
+    বানিয়ে _COMMAND_HANDLERS-এ রাখে (`.commands`/`.callback` পড়ে — robust/future-proof:
+    কোথাও আলাদা করে কমান্ড-তালিকা বজায় রাখতে হয় না)। app না দিলে (টেস্ট/ডাইরেক্ট-কল)
+    আগে থেকে জমা থাকা ম্যাপ অক্ষত থাকে।"""
+    if app is None:
+        return _COMMAND_HANDLERS
+    try:
+        for group_handlers in getattr(app, "handlers", {}).values():
+            for handler in group_handlers:
+                commands = getattr(handler, "commands", None)
+                callback = getattr(handler, "callback", None)
+                if commands and callable(callback):
+                    for cmd in commands:
+                        _COMMAND_HANDLERS[str(cmd).lstrip("/").lower()] = callback
+    except Exception as e:  # noqa: BLE001
+        logger.debug("MCP command-handler scan skipped: %s", e)
+    return _COMMAND_HANDLERS
+
+
+def _resolve_command_handler(command_name: str):
+    """কমান্ড নাম → হ্যান্ডলার ফাংশন। অগ্রাধিকার: app.handlers থেকে অটো-কালেক্টেড
+    _COMMAND_HANDLERS; ফলব্যাক: মডিউল গ্লোবাল '<cmd>_command' (টেস্টে app ছাড়া সরাসরি
+    ব্যবহারের জন্য — ping→ping_command, codeproject→codeproject_command ইত্যাদি)।"""
+    handler = _COMMAND_HANDLERS.get(command_name)
+    if handler is None:
+        handler = globals().get(f"{command_name}_command")
+    return handler if callable(handler) else None
+
+
+class _SimSentMessage:
+    """fake reply_text()/edit_text()-এর রিটার্ন অবজেক্ট — .edit_text()/.delete() সাপোর্ট করে।"""
+
+    def __init__(self, sink: List[str]):
+        self._sink = sink
+
+    async def edit_text(self, text: str, **kwargs):
+        # ping_command-এর মতো হ্যান্ডলার "thinking" মেসেজ edit করে — নতুন টেক্সটও জমা হয়।
+        self._sink.append(str(text))
+        return self
+
+    async def delete(self):
+        # codeproject/codenext-এর "thinking" মেসেজ delete() কল করে — সিমুলেশনে no-op।
+        return None
+
+
+class _SimUser:
+    def __init__(self, user_id: int):
+        self.id = user_id
+        self.first_name = "MCP"
+        self.username = "mcp_client"
+        self.language_code = "bn"
+
+
+class _SimMessage:
+    """fake Update.message — reply_text() শুধু লোকাল লিস্টে জমা করে; কোনো নেটওয়ার্ক কল নেই।"""
+
+    def __init__(self, user_id: int, text: str, chat_id: int):
+        self.text = text
+        self.chat_id = chat_id
+        self.from_user = _SimUser(user_id)
+        self.reply_to_message = None
+        self.sent: List[str] = []
+
+    async def reply_text(self, text: str, **kwargs):
+        self.sent.append(str(text))
+        return _SimSentMessage(self.sent)
+
+
+class _SimUpdate:
+    """fake Update — effective_user/effective_chat/effective_message + message.text/chat_id।"""
+
+    def __init__(self, user_id: int, text: str, chat_id: int):
+        self.effective_user = _SimUser(user_id)
+        self.effective_chat = _SimUser(user_id)
+        self.message = _SimMessage(user_id, text, chat_id)
+        self.effective_message = self.message
+
+    @property
+    def sent_texts(self) -> List[str]:
+        return self.message.sent
+
+
+class _SimContext:
+    """fake Context — args (কমান্ডের পরের শব্দ) + bot_data/user_data (খালি dict)।"""
+
+    def __init__(self, args: Optional[List[str]] = None):
+        self.args = list(args) if args is not None else []
+        self.user_data: Dict[str, Any] = {}
+        self.bot_data: Dict[str, Any] = {}
+        self.bot = None  # সিমুলেশনে কোনো আসল Bot অবজেক্ট নেই (নো নেটওয়ার্ক)
+
+
+def _build_fake_update_context(user_id: int, text: str):
+    """সিমুলেশনের জন্য হালকা fake (Update, Context) জোড়া বানায় — টেস্ট ফাইলগুলোর
+    FakeUpdate/FakeMessage/FakeContext প্যাটার্নের মতোই (tests/test_real_search_integration.py)।
+    কোনো টেলিগ্রাম/নেটওয়ার্ক কল হয় না।"""
+    text = text or ""
+    stripped = text.strip()
+    args: List[str] = []
+    if stripped.startswith("/"):
+        parts = stripped.split()
+        if len(parts) > 1:
+            args = parts[1:]
+    return _SimUpdate(user_id, text, chat_id=user_id), _SimContext(args)
+
+
+async def simulate_message(text: str, user_id: int = 990000001) -> dict:
+    """বটকে একটা মেসেজ/কমান্ড পাঠালে বট যে টেক্সট-রিপ্লাইগুলো পাঠাত সেগুলো ফেরত দেয় — টেলিগ্রাম ছাড়াই,
+    লোকালি টেস্ট করার জন্য। প্রোডাকশন ইউজার বা আসল Bot/Application-কে কিছুই স্পর্শ করে না।
+
+    ব্যবহার:
+      - যেকোনো কমান্ড: "/ping", "/noapimode on", "/codeproject <বিবরণ>", "/codenext" ইত্যাদি।
+      - কমান্ড ছাড়া সাধারণ টেক্সটও দেওয়া যায় (chat_general দিয়ে উত্তর হয়)।
+      - আগে "/noapimode on" দিয়ে No API Mode চালু করে "/codeproject ..." → "/codenext"
+        চালালে AI/নেটওয়ার্ক কল ছাড়াই deterministic উত্তর পাওয়া যায়।
+      - user_id ঐচ্ছিক (ডিফল্ট 990000001) — আলাদা আইডি দিলে টেস্ট-ডেটা প্রোডাকশন থেকে আলাদা থাকে।
+
+    রিটার্ন: {"status": "ok"|"error", "replies": [রিপ্লাই-টেক্সট...], "user_id": int}
+    (কোনো হ্যান্ডলার এরর দিলে status="error" + error মেসেজ + তখন পর্যন্ত জমা হওয়া replies।)
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"status": "error", "error": "empty message", "replies": []}
+
+    register_user(user_id)
+    update, context = _build_fake_update_context(user_id, text)
+
+    handler = None
+    if text.startswith("/"):
+        command_name = text[1:].split()[0].split("@")[0].lower()
+        handler = _resolve_command_handler(command_name)
+    else:
+        handler = chat_general
+
+    if handler is None:
+        # কমান্ড চেনা যায়নি — স্পেসিফিকেশন অনুযায়ী সাধারণ চ্যাট হিসেবে chat_general-এ পাঠানো হয়।
+        handler = chat_general
+
+    try:
+        await handler(update, context)
+    except Exception as e:  # noqa: BLE001
+        logger.error("MCP simulate_message error: %s", e)
+        return {"status": "error", "error": str(e), "replies": list(update.sent_texts)}
+    return {"status": "ok", "replies": list(update.sent_texts), "user_id": user_id}
+
+
+def _build_mcp_server(app=None):
     """FastMCP সার্ভার বানায় ও টুলগুলো রেজিস্টার করে। ইমপোর্ট এখানে করা হয়েছে যাতে
     MCP লাইব্রেরি ইনস্টল না থাকলেও মূল বট চালু হতে কোনো বাধা না হয়।"""
     try:
@@ -16312,6 +18052,10 @@ def _build_mcp_server():
         streamable_http_path="/",
         transport_security=_transport_security,
     )
+
+    # simulate_message টুলের কমান্ড-ডিসপ্যাচের জন্য: app.handlers থেকে CommandHandler গুলো
+    # অটো-স্ক্যান করে _COMMAND_HANDLERS ম্যাপ বানাও (app না থাকলে ফলব্যাক গ্লোবাল-নেম ব্যবহার হয়)।
+    _collect_command_handlers(app)
 
     @mcp_app.tool()
     def add_knowledge(category: str, title: str, content: str, priority: int = 5,
@@ -16428,6 +18172,10 @@ def _build_mcp_server():
         থাকতে হবে। ডুপ্লিকেট স্বয়ংক্রিয়ভাবে স্কিপ হয়।"""
         return PatternEngine().bulk_import(patterns)
 
+    # simulate_message: মডিউল-লেভেল async ফাংশন (টেস্ট থেকে সরাসরি main.simulate_message() কল করা
+    # যায়) — FastMCP-এর tool() ডেকোরেটর একই ফাংশন ফেরত দেয়, তাই রেজিস্টার করলেও ফাংশন অক্ষত থাকে।
+    mcp_app.tool()(simulate_message)
+
     return mcp_app
 
 
@@ -16440,9 +18188,109 @@ def _start_mcp_server_in_background():
     return
 
 
+# ============ Phase 43-diag: ডায়াগনস্টিক — সব ইনকামিং HTTP রিকোয়েস্ট লগ ============
+# প্রেক্ষাপট: OAuth ফ্লো (/oauth/register → /oauth/authorize → /oauth/token) Render লগে
+# সম্পূর্ণ সফল ("token ইস্যু সফল" পর্যন্ত), কিন্তু তারপর Claude-এর "connecting" ধাপে
+# (/mcp-তে আসল MCP initialize হ্যান্ডশেক) ঠিক কোথায় ভাঙছে তা বোঝা যাচ্ছে না — /mcp
+# Mount-এর ভেতরের _AuthASGIMiddleware-এর লগ পর্যন্ত একটাও আসছে না (তিনবার টেস্টে)।
+# সম্ভাবনা দুটো: (১) রিকোয়েস্ট Render/নেটওয়ার্ক লেভেলেই আটকাচ্ছে, অ্যাপ পর্যন্ত
+# পৌঁছাচ্ছে না; (২) পৌঁছাচ্ছে কিন্তু Starlette-এর রাউটার সেটাকে /mcp Mount-এ মেলাতে
+# পারছে না (যেমন প্রক্সি root_path/prefix বদলে দিলে) — সেক্ষেত্রে সেটা নীরব 404,
+# কারণ _AuthASGIMiddleware রাউট-ম্যাচের *ভেতরে* চলে, তাই সেটা স্পর্শই করে না।
+# নিচের মিডলওয়্যারটা চূড়ান্ত ফয়সালা করে: এটা Starlette-এর রাউটিং শুরু হওয়ার *আগে*
+# প্রতিটা HTTP রিকোয়েস্ট লগ করে — তাই লগে [RAWREQ] /mcp এন্ট্রি থাকলে সমস্যা রাউটিং/
+# অ্যাপের ভেতরে, আর পুরোপুরি না থাকলে রিকোয়েস্ট অ্যাপে পৌঁছচ্ছেই না (ইনফ্রা লেভেল)।
+class _RawRequestLogger:
+    """সবচেয়ে বাইরের raw-ASGI লগিং লেয়ার — Starlette রাউটিং শুরুর আগেই প্রতিটা HTTP
+    রিকোয়েস্টের method/path + কিছু হেডার লগ করে। ডায়াগনস্টিক: /mcp রিকোয়েস্ট অ্যাপে
+    আদৌ পৌঁছাচ্ছে কিনা (404 হলেও) নিশ্চিত করতে। কোনো রিকোয়েস্ট ব্লক/পরিবর্তন করে না।
+    """
+
+    def __init__(self, inner_app):
+        self.inner_app = inner_app
+
+    def __getattr__(self, name):
+        # স্বচ্ছ প্রক্সি: uvicorn অ্যাপ অবজেক্টে অ্যাট্রিবিউট-ইন্সপেকশন করতে পারে
+        # (যেমন পুরোনো কিছু ভার্সনে lifespan="auto" সিদ্ধান্ত নেয়
+        # hasattr(app, "add_event_handler") দেখে)। এই লেয়ারের কারণে যদি সেই চেক
+        # বদলে যায়, তাহলে FastMCP-এর session-manager lifespan চালুই হবে আর /mcp
+        # সব রিকোয়েস্টে ব্যর্থ হবে — অর্থাৎ ডায়াগনস্টিক নিজে বাগ বানিয়ে ফেলবে।
+        # তাই এই ক্লাসে না-পাওয়া যেকোনো অ্যাট্রিবিউট ভেতরের অ্যাপে ডিলিগেট করা হয়,
+        # যাতে wrap-এর আগে-পরে uvicorn-এর দৃষ্টিতে অ্যাপ হুবহু একই থাকে।
+        return getattr(self.inner_app, name)
+
+    async def __call__(self, scope, receive, send):
+        # লগিং নিজে কোনোভাবেই রিকোয়েস্ট ভাঙতে পারবে না — তাই সব ডায়াগনস্টিক
+        # লজিক try/except-এ মোড়া; ভেতরের অ্যাপ কলটা সর্বদা একইভাবে হয়।
+        try:
+            if scope.get("type") == "http":
+                path = scope.get("path", "")
+                method = scope.get("method", "")
+                headers = dict(scope.get("headers") or [])
+                content_type = headers.get(b"content-type", b"").decode("latin-1")
+                user_agent = headers.get(b"user-agent", b"").decode("latin-1")[:120]
+                has_auth = b"authorization" in headers
+                logger.warning(
+                    f"[RAWREQ] {method} {path} | content-type={content_type!r} "
+                    f"user-agent={user_agent!r} has_auth_header={has_auth}"
+                )
+                if "mcp" in path.lower():
+                    # /mcp-সংক্রান্ত যেকোনো রিকোয়েস্টে বাড়তি ডিটেইল: root_path/raw_path
+                    # path-এর থেকে আলাদা হলে প্রক্সি পথ বদলে দিচ্ছে (রাউটিং-লেভেল মিসম্যাচ),
+                    # আর পুরোটাই না আসলে রিকোয়েস্ট অ্যাপে পৌঁছাচ্ছেই না (নেটওয়ার্ক-লেভেল)।
+                    header_names = sorted({k.decode("latin-1") for k, _v in (scope.get("headers") or [])})
+                    logger.warning(
+                        f"[RAWREQ][MCP] details: root_path={scope.get('root_path', '')!r} "
+                        f"raw_path={scope.get('raw_path')!r} "
+                        f"query_string={scope.get('query_string', b'').decode('latin-1')!r} "
+                        f"client={scope.get('client')!r} header_names={header_names}"
+                    )
+        except Exception as _diag_exc:  # noqa: BLE001
+            logger.warning(f"[RAWREQ] ডায়াগনস্টিক লগিং ব্যর্থ (উপেক্ষা করা হলো): {type(_diag_exc).__name__}: {_diag_exc}")
+        await self.inner_app(scope, receive, send)
+
+
 def main():
     """সিঙ্ক্রোনাস এন্ট্রি পয়েন্ট — নিচের async ফাংশনটা চালায়।"""
     asyncio.run(run_bot_async())
+
+
+def make_telegram_webhook(app):
+    """Telegram webhook route handler বানায় (Starlette `request -> response`)।
+
+    আগে এই হ্যান্ডলারটা `run_bot_async()`-এর ভেতরে nested ছিল; টেস্ট থেকে আসল
+    কোডটাই চালানো যায় বলে factory আকারে মডিউল-লেভেলে তোলা হলো — আচরণ আগের
+    মতোই আছে (`app` closure-এ ধরা থাকে, Route রেজিস্ট্রেশন বদলায়নি)।
+
+    Render ক্র্যাশ-ফিক্স: `request.json()` সফল হলেও পেলোডে `update_id` না
+    থাকলে (যেমন `{}` — health-check বট/স্ক্যানার/মনিটরিং টুল পাঠাতে পারে)
+    `Update.de_json()` `TypeError` ছুঁড়ে পুরো রিকোয়েস্ট 500 দিয়ে ক্র্যাশ
+    করত। এখন অসম্পূর্ণ পেলোড চুপচাপ `ok` দিয়ে উপেক্ষা করা হয়, আর প্রসেসিং
+    এরর লগে রেখে `ok`-ই ফেরত দেওয়া হয় (এরর দেখালে টেলিগ্রাম বারবার
+    রিট্রাই করবে)।
+    """
+    from starlette.responses import PlainTextResponse
+
+    async def telegram_webhook(request):
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            return PlainTextResponse("bad request", status_code=400)
+        if not isinstance(data, dict) or "update_id" not in data:
+            # আসল টেলিগ্রাম আপডেট না (health-check/স্ক্যানার/ভুল পেলোড) —
+            # ক্র্যাশ না করে চুপচাপ ok রিটার্ন করো, যাতে সার্ভার স্থিতিশীল থাকে।
+            logger.debug("telegram_webhook: অচেনা/অসম্পূর্ণ পেলোড উপেক্ষা করা হলো: %r", data)
+            return PlainTextResponse("ok")
+        try:
+            update = Update.de_json(data, app.bot)
+            await app.process_update(update)
+        except Exception as e:  # noqa: BLE001
+            logger.error("telegram_webhook: আপডেট প্রসেস করতে ব্যর্থ: %s", e, exc_info=True)
+            # টেলিগ্রামকে এরর দেখালে ও বারবার রিট্রাই করবে — তাই ok-ই রিটার্ন করা ভালো,
+            # কিন্তু এররটা লগে থাকবে যাতে ডিবাগ করা যায়।
+        return PlainTextResponse("ok")
+
+    return telegram_webhook
 
 
 async def run_bot_async():
@@ -16625,14 +18473,7 @@ async def run_bot_async():
     PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
     WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", TELEGRAM_BOT_TOKEN.split(":")[0])
 
-    async def telegram_webhook(request):
-        try:
-            data = await request.json()
-        except Exception:  # noqa: BLE001
-            return PlainTextResponse("bad request", status_code=400)
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-        return PlainTextResponse("ok")
+    telegram_webhook = make_telegram_webhook(app)
 
     async def health_check(request):
         return JSONResponse({"status": "ok", "bot": "running"})
@@ -16657,7 +18498,7 @@ async def run_bot_async():
         )
     elif MCP_ADMIN_TOKEN:
         try:
-            mcp_app = _build_mcp_server()
+            mcp_app = _build_mcp_server(app)
             # Phase 43-fix: host="0.0.0.0" parameter current FastMCP version-এ supported নয়
             # Host binding uvicorn config-এ (line 16337-এ) করা হয় "host=0.0.0.0" দিয়ে
             # streamable_http_app() শুধু ASGI app expose করে, host handling-এর দায়িত্ব নেয় না
@@ -16990,6 +18831,15 @@ button{{width:100%;padding:10px;background:#111;color:#fff;border:0;border-radiu
         web_app = Starlette(routes=routes, lifespan=mcp_lifespan)
     else:
         web_app = Starlette(routes=routes)
+
+    # Phase 43-diag: [RAWREQ] ডায়াগনস্টিক লগার — wrapটা web_app বানানোর পুরো লজিকের
+    # (দুটো ব্রাঞ্চই) একদম শেষে, কারণ নিচের uvicorn.Config() ঠিক এই web_app ভ্যারিয়েবলটা
+    # serve করে — তাই এটাই অ্যাপের সবচেয়ে বাইরের লেয়ার। এর ফলে Starlette-এর রাউটার
+    # রুট-ম্যাচিং শুরু করার আগেই প্রতিটা রিকোয়েস্ট লগ হয়, এবং /mcp Mount-এ মেলাতে
+    # না-পেরে 404 হওয়া রিকোয়েস্টগুলোও ([RAWREQ] হিসেবে) দেখা যায়। এটা শুধু লগ করে —
+    # কোনো রিকোয়েস্ট/রেসপন্স ব্লক বা বদলায় না (উপরের ক্লাসের ডকস্ট্রিং দেখুন)।
+    web_app = _RawRequestLogger(web_app)
+    logger.warning("[RAWREQ] ডায়াগনস্টিক গ্লোবাল মিডলওয়্যার সক্রিয় — প্রতিটা HTTP রিকোয়েস্ট লগ হবে")
 
     await app.initialize()
     await app.start()
