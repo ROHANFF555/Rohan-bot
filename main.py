@@ -2794,7 +2794,15 @@ class PatternEngine:
             text_tokens = set(re.findall(r"[\w\u0980-\u09FF]+", text_lower, flags=re.UNICODE))
             if not intent_tokens or not text_tokens:
                 return None
-            overlap = len(intent_tokens & text_tokens)
+            # সমার্থক শব্দ দিয়ে প্রসারিত করো — ইউজার "যোগ" না বলে "মোট বের করো"
+            # (বা "add") বললেও একই ইন্টেন্ট মেলবে (bangla_synonyms.SYNONYM_GROUPS)।
+            # লাইব্রেরি import না গেলেও পুরনো token-overlap behavior-তে ফিরে যায় (non-fatal)।
+            try:
+                from bangla_synonyms import expand_with_synonyms
+                expanded_text = expand_with_synonyms(text_tokens)
+            except ImportError:
+                expanded_text = text_tokens
+            overlap = len(intent_tokens & expanded_text)
             if overlap == 0:
                 return None
             return (overlap / len(intent_tokens)) * pattern.confidence_score
