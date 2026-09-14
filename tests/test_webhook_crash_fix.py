@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 import shutil
 import sys
 import tempfile
@@ -48,14 +49,18 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKDIR = tempfile.mkdtemp(prefix="rohan-bot-test-")
 shutil.copyfile(os.path.join(REPO_ROOT, "main.py"), os.path.join(WORKDIR, "main.py"))
-sys.path.insert(0, WORKDIR)
+OLD_CWD = os.getcwd()
 os.chdir(WORKDIR)
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:dummy-token")
 os.environ.setdefault("ADMIN_IDS", "111")
 os.environ.setdefault("GROQ_API_KEY", "gsk_dummy_key_for_tests")
 
-import main  # noqa: E402  (উপরের env/path সেটআপের পরেই import করতে হবে)
+# Do not reuse another test's cached main module and deleted temporary DB.
+spec = importlib.util.spec_from_file_location("webhook_test_main", os.path.join(WORKDIR, "main.py"))
+main = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = main
+spec.loader.exec_module(main)
 
 from starlette.applications import Starlette  # noqa: E402
 from starlette.routing import Route  # noqa: E402
@@ -206,5 +211,9 @@ if FAILED:
     print("\n".join(f"❌ {f}" for f in FAILED))
 print(f"\nমোট: {len(PASSED)} passed, {len(FAILED)} failed")
 
+os.chdir(OLD_CWD)
+sys.modules.pop(spec.name, None)
 shutil.rmtree(WORKDIR, ignore_errors=True)
-sys.exit(1 if FAILED else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAILED else 0)
+assert not FAILED, "\n".join(FAILED)

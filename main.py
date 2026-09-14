@@ -15502,22 +15502,22 @@ async def codeproject_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     thinking = await msg.reply_text("🧠 রিকোয়েস্ট বিশ্লেষণ করে প্ল্যান বানাচ্ছি...") if msg else None
     try:
         plan = await coding_analyze_and_plan(raw_request, user_id)
-        project_id = create_code_project(user_id, plan["project_name"], raw_request, plan["stack"], plan["tasks"])
-        project = get_project(project_id, owner_id=user_id)
-        try:
-            api_create_context(
-                user_id=user_id, session_key=str(user_id),
-                data={"language": plan.get("stack", ""), "project": plan.get("project_name", ""), "style": "step-by-step"},
-                scope="project", category="coding_project", tags=["phase17", "coding"], priority=8,
-            )
-        except Exception as e:
-            logger.debug("Phase 17 project context save skipped: %s", e)
         if plan.get("no_api_blocked"):
             # No API Mode-এ AI প্ল্যান হয়নি — "AI দিয়ে প্ল্যান তৈরি হয়েছে" দাবি না করে
             # /codeplan-এর মতোই blocked মেসেজ দেখানো হয়।
             if msg:
                 await msg.reply_text(NO_API_PLAN_BLOCKED_MESSAGE)
         else:
+            project_id = create_code_project(user_id, plan["project_name"], raw_request, plan["stack"], plan["tasks"])
+            project = get_project(project_id, owner_id=user_id)
+            try:
+                api_create_context(
+                    user_id=user_id, session_key=str(user_id),
+                    data={"language": plan.get("stack", ""), "project": plan.get("project_name", ""), "style": "step-by-step"},
+                    scope="project", category="coding_project", tags=["phase17", "coding"], priority=8,
+                )
+            except Exception as e:
+                logger.debug("Phase 17 project context save skipped: %s", e)
             deterministic_note = (
                 "\n\n🤖 এই প্ল্যানটি AI কল ছাড়াই deterministicভাবে তৈরি হয়েছে।"
                 if plan.get("deterministic") else ""

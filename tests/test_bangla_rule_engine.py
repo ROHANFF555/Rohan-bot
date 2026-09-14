@@ -216,6 +216,35 @@ class BanglaRuleEngineUnitTests(unittest.TestCase):
         self.assertEqual(lines, ["হ্যালো"] * 5)  # ঠিক ৫ বার — কম/বেশি নয়
 
     # -- loop: পরিসর (for-range, ধরন ১খ) --------------------------------------
+    def test_quoted_and_dynamic_loop_requests(self):
+        cases = [
+            ('৫ বার "শুভ সকাল" দেখাবে', ["শুভ সকাল"] * 5),
+            ('রান করলে ৫ বার হ্যালো লেখা আসবে', ["হ্যালো"] * 5),
+            ('৫ বার শুভ সকাল দেখাবে', ["শুভ সকাল"] * 5),
+            ('এমন একটি কোড লেখা যেটা রান করলে ১ থেকে ১০ পর্যন্ত লেখা আসবে',
+             [str(i) for i in range(1, 11)]),
+            ('১ থেকে ১০ পর্যন্ত সংখ্যা দেখাবে', [str(i) for i in range(1, 11)]),
+            ('রান করলে ৫ বার "শুভ সকাল" লেখা আসবে', ["শুভ সকাল"] * 5),
+        ]
+        for request, expected in cases:
+            with self.subTest(request=request):
+                code = self._translate(request)
+                self.assertIn("for i in range(", code)
+                result = run_python_code(code, "", self.workdir, "loop_regression")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), expected)
+
+    def test_quoted_dynamic_loops_preserve_safety_guards(self):
+        for request in (
+            'জাভাস্ক্রিপ্টে ৫ বার "শুভ সকাল" দেখাবে',
+            '১০০০১ বার "শুভ সকাল" দেখাবে',
+            'রান করলে ১ থেকে ১০০০১ পর্যন্ত লেখা আসবে',
+            'নাম ইনপুট নেবে এবং ৫ বার "শুভ সকাল" দেখাবে',
+            'যদি নাম রহিম হলে ৫ বার "শুভ সকাল" দেখাবে',
+        ):
+            with self.subTest(request=request):
+                self.assertIsNone(bre.translate_bangla_rules(request))
+
     def test_loop_range(self):
         code = self._translate("১ থেকে ৫ পর্যন্ত সংখ্যা দেখাবে")
         self.assertIn("for i in range(1, 6):", code)  # B + 1 (৫ সহ)
@@ -283,7 +312,6 @@ class BanglaRuleEngineUnitTests(unittest.TestCase):
             # নিষেধ করা loop
             "৫ বার হ্যালো লিখবে না",
             # গার্ড: dynamic-print আকৃতি / কোটেশন / UI / অন্য ভাষা
-            "রান করলে ৫ বার হ্যালো লেখা আসবে",
             'প্রোগ্রাম "হ্যালো" ৫ বার প্রিন্ট করবে',
             "ড্যাশবোর্ডে ১০ বার প্রোফাইল দেখাবে",
             "জাভাস্ক্রিপ্টে ৫ বার হ্যালো লিখবে",
@@ -525,6 +553,26 @@ class BanglaRuleEngineIntegrationTests(unittest.TestCase):
         ask_ai.assert_not_awaited()
 
     # -- loop-টাস্কও No API Mode-এ AI ছাড়াই resolve হয় ------------------------
+    def test_loop_regressions_use_rule_engine_in_no_api_planner(self):
+        async def run():
+            for request in (
+                '৫ বার "শুভ সকাল" দেখাবে',
+                'এমন একটি কোড লেখা যেটা রান করলে ১ থেকে ১০ পর্যন্ত লেখা আসবে',
+                '৫ বার শুভ সকাল দেখাবে',
+                '১ থেকে ১০ পর্যন্ত সংখ্যা দেখাবে',
+            ):
+                with self.subTest(request=request), patch.object(
+                    self.main, "ask_ai", new=AsyncMock()
+                ) as ai:
+                    plan = await self.main.coding_analyze_and_plan(request, USER_ID_NOAPI)
+                    self.assertFalse(plan.get("no_api_blocked"))
+                    self.assertTrue(plan.get("deterministic"))
+                    match = self.main._match_bangla_rule_request(request)
+                    self.assertIsNotNone(match)
+                    self.assertIn("for i in range(", match[1])
+                    ai.assert_not_awaited()
+        asyncio.run(run())
+
     def test_loop_task_resolves_without_ai(self):
         """loop-রুল এখন matcher চেইনে: "৫ বার হ্যালো লিখবে" টাস্ক No API Mode-এও
         knowledge_base:bangla_rule_engine থেকেই আসে, কোনো AI কল ছাড়াই।"""

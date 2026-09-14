@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 
 USER_ID = 774433
@@ -203,6 +204,41 @@ class NoApiCodingGuardTests(unittest.TestCase):
 
         plan = asyncio.run(run())
         self.assertTrue(plan.get("no_api_blocked"))
+
+    def test_blocked_codeproject_does_not_create_or_replace_project(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                user_id = USER_ID + 100 + int(existing)
+                self.main.register_user(user_id)
+                self.main.set_no_api_mode(user_id, True)
+                if existing:
+                    self.main.create_code_project(
+                        user_id, "Existing project", "Keep this", "python",
+                        [{"title": "Existing task", "description": "Keep this task"}],
+                    )
+                before = self.main.list_user_projects(user_id)
+                active_before = self.main.get_active_project(user_id)
+                thinking = SimpleNamespace(delete=AsyncMock())
+                msg = SimpleNamespace(reply_text=AsyncMock(return_value=thinking))
+                update = SimpleNamespace(
+                    effective_user=SimpleNamespace(id=user_id),
+                    message=msg, effective_message=msg,
+                )
+                context = SimpleNamespace(args=["একটি অচেনা inventory analytics app বানাও"])
+
+                async def run():
+                    with patch.object(self.main, "quota_guard", new=AsyncMock(return_value=True)), \
+                         patch.object(self.main, "ask_ai", new=AsyncMock()) as ai, \
+                         patch.object(self.main, "api_create_context") as save_context:
+                        await self.main.codeproject_command(update, context)
+                        ai.assert_not_awaited()
+                        save_context.assert_not_called()
+
+                asyncio.run(run())
+                msg.reply_text.assert_any_await(self.main.NO_API_PLAN_BLOCKED_MESSAGE)
+                thinking.delete.assert_awaited_once()
+                self.assertEqual(self.main.list_user_projects(user_id), before)
+                self.assertEqual(self.main.get_active_project(user_id), active_before)
 
     def test_codeproject_handles_edited_message_update(self):
         class FakeUser:
