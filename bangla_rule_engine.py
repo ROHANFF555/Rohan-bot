@@ -4,7 +4,7 @@
 ধাপে ধাপে চালানোর-যোগ্য Python প্রোগ্রামে অনুবাদ করে। main.py-এর
 match_dynamic_print_task()/_match_dynamic_print_request() জুটির *পরিপূরক* —
 ইঞ্জিনের ভেতরের গার্ড dynamic-print-আকৃতির ("রান করলে X লেখা আসবে") বা কোটেশন-
-যুক্ত রিকোয়েস্ট আগেই বাদ দিয়ে দেয়, তাই সেগুলো আগের মতোই পুরনো matcher-এ যায়
+যুক্ত রিকোয়েস্ট loop/range ম্যাচ না হলে বাদ দিয়ে দেয়, তাই সেগুলো আগের মতোই পুরনো matcher-এ যায়
 (matcher চেইনে এই ইঞ্জিন dynamic-print-এর আগে বসলেও)।
 
 v1 রুলস (প্রতিটা রুল = ট্রিগার-প্যাটার্ন + কোড-টেমপ্লেট):
@@ -232,7 +232,7 @@ _OUTPUT_RE = _rx(
 # ৭) loop রুল (for-range) — নির্দিষ্ট-সংখ্যক পুনরাবৃত্তি। ক্রিয়া-তালিকা আউটপুট রুলেরই
 # মতো, তাই "দেখাবে/লিখবে"-ভাষার নির্দেশই ধরা পড়ে ("নাচবে/ঘুরবে" জাতীয় কিছু নয়)।
 _LOOP_VERB_PAT = (
-    r"(?:দেখাবে|দেখাক|দেখাবেন|লিখবে|লিখবেন|প্রিন্ট\s+করবে|প্রিন্ট\s+করো|প্রিন্ট\s+করে)"
+    r"(?:দেখাবে|দেখাক|দেখাবেন|লিখবে|লিখবেন|প্রিন্ট\s+করবে|প্রিন্ট\s+করো|প্রিন্ট\s+করে|লেখা\s+আসবে)"
 )
 # ধরন ১ক: "<N> বার <বার্তা> {দেখাবে|লিখবে|প্রিন্ট করবে}"
 _LOOP_COUNT_RE = _rx(
@@ -546,6 +546,10 @@ def _match_loop(t: str, neg_spans: List[Tuple[int, int]],
             return None, True
         count = int(digits)
         captured = count_m.group(2)
+        # Only unwrap a complete quotation around the repeated message.
+        quote_pairs = {'"': '"', "'": "'", '“': '”', '‘': '’', '«': '»', '`': '`'}
+        if len(captured) >= 2 and quote_pairs.get(captured[0]) == captured[-1]:
+            captured = captured[1:-1]
         message = _clean_phrase(captured, max_len=80)
         # সীমানা-শব্দে কাটা পড়া বার্তা ("... চেক করবে এবং সাকসেস") = কড়া ফরম্যাট নয়
         if not message or message != captured.strip():
@@ -571,10 +575,6 @@ def _parse(text: str) -> Optional[dict]:
         return None
     if not re.search(r"[\u0980-\u09ff]", t):
         return None  # বাংলা অক্ষর নেই — এই ইঞ্জিনের নয়
-    if _QUOTE_RE.search(t):
-        return None  # কোটেশন — dynamic-print ম্যাচারের ডোমেইন
-    if _DYNAMIC_PRINT_SHAPE_RE.search(t):
-        return None  # "রান করলে ... লেখা আসবে" জাতীয় — পুরনো ম্যাচারের ডোমেইন
     if _UI_FRAMEWORK_RE.search(t):
         return None  # UI/ফিচার-বর্ণনা — কনসোল-প্রোগ্রামের নির্দেশনা নয়
     if _NON_PYTHON_LANG_RE.search(t):
@@ -590,6 +590,9 @@ def _parse(text: str) -> Optional[dict]:
     loop, loop_blocked = _match_loop(t, neg_spans, outputs)
     if loop_blocked:
         return None  # loop-আকৃতির কিন্তু নিরাপদে জেনারেট করা যায় না → AI ফলব্যাক
+    # A safe loop takes precedence over literal dynamic-print fallback.
+    if loop is None and (_QUOTE_RE.search(t) or _DYNAMIC_PRINT_SHAPE_RE.search(t)):
+        return None
     return {
         "container": container,
         "storage_fields": storage_fields,
