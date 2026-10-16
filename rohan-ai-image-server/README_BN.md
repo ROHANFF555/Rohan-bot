@@ -39,6 +39,12 @@ docker compose logs -f
 
 `GET /images/<filename>`-এ একই `X-API-Key` header লাগবে।
 
+## ঐচ্ছিক LoRA fine-tuning
+- `dataset/metadata.jsonl` এবং ছবিগুলো এই ফোল্ডারের `dataset/`-এ রাখো।
+- প্রতিটি JSONL লাইনে `{"file_name":"image1.jpg","text":"ছবির ইংরেজি বর্ণনা"}` ফরম্যাট ব্যবহার করো; ছবির ফাইলটি `dataset/` ফোল্ডারে থাকতে হবে।
+- Linux + NVIDIA GPU-তে training dependencies ইনস্টল করে চালাও: `bash train_lora.sh`
+- Training scriptটি starter; এটি এখানে চালিয়ে যাচাই করা হয়নি। Diffusers-এর নতুন সংস্করণে argument বদলাতে পারে।
+
 ## নিরাপত্তা ও সীমাবদ্ধতা
 - এই starter-টি production-ready নয়। Public internet-এ প্রকাশের আগে HTTPS, authentication, rate limiting, logging, queueing এবং safety controls যোগ করতে হবে।
 - API key না সেট করলে generation বন্ধ থাকবে।
