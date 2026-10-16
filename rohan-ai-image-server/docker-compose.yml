@@ -1,0 +1,16 @@
+services:
+  rohan-ai:
+    build: .
+    container_name: rohan-ai
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      HF_HOME: /models/huggingface
+      OUTPUT_DIR: /app/outputs
+    volumes:
+      - ./models:/models
+      - ./outputs:/app/outputs
+    gpus: all
+    restart: unless-stopped
